@@ -195,7 +195,10 @@ def write_requested_file(
     tools: ToolRunner,
     home: Path | None = None,
 ) -> str | None:
-    """Write a file the user named. Returns None when the message is not that request."""
+    """Create a new file the user named. Returns None when the message is not that request.
+
+    An existing file is never overwritten here; that request goes to the model and the crew.
+    """
     if not re.search(r"\b(?:make|create|write|save|add)\b", text, re.IGNORECASE):
         return None
     if not re.search(r"\bfile\b", text, re.IGNORECASE) and not _BARE_FILENAME.search(text):
@@ -210,6 +213,10 @@ def write_requested_file(
     folder = work_folder(text, tools.project, home)
     if not folder.is_dir():
         return f"{folder} is not a folder I can write in."
+    if (folder / relative).exists():
+        # "Add a docstring to utils.py" names an existing file to change, not one to create.
+        # Editing goes to the crew, which snapshots first so the change can be undone.
+        return None
     content = _requested_content(text)
     runner = tools
     if folder.resolve() != tools.project.resolve():

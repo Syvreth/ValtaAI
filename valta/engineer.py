@@ -254,8 +254,23 @@ def _coder_round(
             _emit(on_event, "coder", f"{action.name} {detail}\n{result}")
         history.append({"role": "assistant", "content": reply})
         history.append({"role": "user", "content": str(result)})
-        history = history[-8:]
+        history = _trim_history(history)
     return summary or "Stopped at the step limit before ACTION done.", wrote
+
+
+CODER_RECENT_TURNS = 3
+
+
+def _trim_history(history: list[dict]) -> list[dict]:
+    """Keep the opening message (goal, plan, action format) and the last few exchanges.
+
+    The opening message is a user turn and each exchange is an assistant reply plus a user result,
+    so the trimmed list still alternates roles.
+    """
+    keep = CODER_RECENT_TURNS * 2
+    if len(history) <= keep + 1:
+        return history
+    return [history[0], *history[-keep:]]
 
 
 def _example_action(action: Action) -> str | None:
