@@ -8,6 +8,7 @@ import typer
 
 from valta.chat import chat_loop, live
 from valta.config import load_settings
+from valta.engineer import run_goal
 from valta.ingest import ingest_path
 from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
@@ -70,6 +71,29 @@ def ingest(path: Path):
     settings, memory, tools, _client = _stack()
     count = ingest_path(path, settings, memory, tools)
     typer.echo(f"Stored {count} chunks.")
+
+
+@app.command()
+def work(
+    goal: str,
+    project: Path | None = typer.Option(None, "--project", help="Folder Valta may change."),
+    tests: str = typer.Option("python -m pytest -q", "--tests", help="python -m pytest or python -m compileall."),
+):
+    """Plan, edit, test, and repair a software project."""
+    settings, memory, tools, client = _stack(project)
+    ok = run_goal(settings, memory, tools, client, goal, tests)
+    if not ok:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def improve(goal: str):
+    """Improve Valta's own code. Root rules and stored memory stay protected."""
+    root = load_settings().root
+    settings, memory, tools, client = _stack(root)
+    ok = run_goal(settings, memory, tools, client, goal, "python -m pytest -q")
+    if not ok:
+        raise typer.Exit(code=1)
 
 
 @app.command()

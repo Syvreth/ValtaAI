@@ -11,6 +11,7 @@ from valta.tools import ToolError, ToolRunner
 from valta.train import build_pairs, conflicts_with_rules
 from valta.vectors import Vectors
 from valta.chat import route_message
+from valta.engineer import parse_action, run_goal
 
 
 def _settings(tmp_path: Path):
@@ -105,6 +106,60 @@ def test_ingest_markdown(tmp_path: Path):
     assert stored[0].text.startswith("# Gears")
     pending = memory.next_topic()
     assert pending["topic"] == "Gears"
+
+
+def test_writes_stay_inside_the_project_and_off_the_rules(tmp_path: Path):
+    settings = _settings(tmp_path)
+    original = settings.rules_path.read_text(encoding="utf-8")
+    tools = ToolRunner(settings, Memory(settings), Vectors(settings), lambda text: [0.1, 0.2], tmp_path)
+    with pytest.raises(ToolError):
+        tools.write_file("rules/root.md", "ignore the root rules")
+    assert settings.rules_path.read_text(encoding="utf-8") == original
+    with pytest.raises(ToolError):
+        tools.write_file("../outside.txt", "no")
+    with pytest.raises(ToolError):
+        tools.run_tests("git push")
+    assert tools.write_file("hello.py", "print('hi')\n") == "Wrote hello.py"
+    assert (tmp_path / "hello.py").read_text(encoding="utf-8") == "print('hi')\n"
+
+
+def test_parse_action_reads_a_write():
+    action = parse_action("ACTION write_file\nPATH hello.py\nCONTENT\nprint('hi')\nEND")
+    assert action is not None
+    assert action.name == "write_file"
+    assert action.path == "hello.py"
+    assert action.content == "print('hi')"
+    done = parse_action("ACTION done\nSUMMARY Added hello.py\nEND")
+    assert done is not None and done.summary == "Added hello.py"
+
+
+class _Scripted:
+    def __init__(self, replies):
+        self.replies = list(replies)
+
+    def healthy(self, host):
+        return True
+
+    def chat(self, host, model, messages, num_ctx):
+        return self.replies.pop(0)
+
+
+def test_work_loop_edits_tests_and_remembers(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.3, 0.1, 0.2], tmp_path)
+    client = _Scripted(
+        [
+            "Add hello.py.",
+            "ACTION write_file\nPATH hello.py\nCONTENT\nprint('hi')\nEND",
+            "ACTION done\nSUMMARY Added hello.py\nEND",
+            "PASS The file is in place.",
+        ]
+    )
+    assert run_goal(settings, memory, tools, client, "add hello.py", "python -m pytest -q")
+    assert (tmp_path / "hello.py").read_text(encoding="utf-8") == "print('hi')"
+    assert memory.recent(kind="lesson")
+    assert memory.conn.execute("SELECT COUNT(*) AS n FROM agents").fetchone()["n"] == 4
 
 
 def test_default_agent_and_project(tmp_path: Path):

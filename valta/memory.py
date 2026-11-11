@@ -221,6 +221,27 @@ class Memory:
             self.conn.commit()
         return agent_id
 
+    def ensure_crew(self) -> None:
+        crew = (
+            ("planner", "Break a goal into a short plan. Do not edit files.", "read_file,list_directory,search_memory"),
+            ("coder", "Edit files inside the project to carry out the plan.", "read_file,list_directory,write_file,search_memory,run_tests"),
+            ("tester", "Run the tests and report the result exactly.", "run_tests"),
+            ("reviewer", "Say whether the work meets the goal after the tests.", "read_file,list_directory,search_memory"),
+        )
+        for name, role, tools in crew:
+            row = self.conn.execute("SELECT id FROM agents WHERE name = ?", (name,)).fetchone()
+            if row:
+                continue
+            with self._lock:
+                self.conn.execute(
+                    """
+                    INSERT INTO agents (id, name, role, model, tools, memory_scope, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (uuid.uuid4().hex, name, role, self.settings.teacher_model, tools, "project", _now()),
+                )
+                self.conn.commit()
+
     def add_example(self, user_text: str, assistant_text: str, source_id: str | None = None) -> str:
         example_id = uuid.uuid4().hex
         with self._lock:

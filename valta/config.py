@@ -27,6 +27,8 @@ class Settings:
     chunk_chars: int
     chunk_overlap: int
     top_k: int
+    work_max_steps: int
+    repair_rounds: int
     extra_models: list[str]
 
     @property
@@ -111,6 +113,8 @@ def load_settings(root: Path | None = None) -> Settings:
         chunk_chars=int(raw["chunk_chars"]),
         chunk_overlap=int(raw["chunk_overlap"]),
         top_k=int(raw["top_k"]),
+        work_max_steps=int(raw.get("work_max_steps", 8)),
+        repair_rounds=int(raw.get("repair_rounds", 2)),
         extra_models=list(raw.get("extra_models", [])),
     )
     settings.ensure_dirs()

@@ -16,5 +16,7 @@ train_threshold = 8
 chunk_chars = 3200
 chunk_overlap = 400
 top_k = 5
+work_max_steps = 8
+repair_rounds = 2
 
 extra_models = []
