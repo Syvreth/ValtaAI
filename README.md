@@ -6,7 +6,7 @@
 
 <p align="center">
   A local companion that remembers, researches, and builds software.<br>
-  One terminal. Chat on the left. The crew on the right.
+  One terminal. Chat first. The crew when there is work.
 </p>
 
 <p align="center">
@@ -21,38 +21,47 @@ Memory, books, fine-tunes, and your private root rules stay on disk. They are no
 
 ## Control center
 
+Chat takes the whole screen. When the crew has work, an Activity panel slides in on the right. Close it with Esc and it stays closed until something new needs a look.
+
 ```
-┌ Session ──────────────────────┐ ┌ Operations ─────────────────────────┐
-│ You    Build me a calculator. │ │ Live   Diff   Jobs   Memory        │
-│ Valta  Queued with the crew.  │ │ Models Approvals                    │
-│                               │ │                                     │
-│                               │ │ planner   short plan                │
-│                               │ │ coder     write_file calc.py        │
-│                               │ │ tester    exit 0                    │
-│                               │ │ reviewer  PASS                      │
-└───────────────────────────────┘ └─────────────────────────────────────┘
- Tell Valta an objective, or ask a question
- Pause   Stop   Approve   Deny
+ valta                              ● teacher Qwen2.5-Coder-7B   ● personal qwen2.5-coder:3b
+
+ ❯ Build me a calculator                    │ Activity (1)  Changes  Memory  Models  Approvals
+   Queued work a1b2c3d4: Build me a ca…     │
+                                            │ ● Build me a calculator
+                                            │   running · a1b2c3d4
+                                            │   planner  short plan
+ ⠹ coder  Build me a calculator             │   coder    write_file calc.py
+                                            │   tester   exit 0
+ ❯ Ask anything, or give Valta an objective │
+ ctrl+p pause   ctrl+x stop   ctrl+o activity
 ```
 
-| Pane | What you see |
+| Panel | What you see |
 | --- | --- |
-| Session | The conversation. An objective such as “Build me a calculator.” is enough. |
-| Live | Planner, coder, tester, and reviewer, in order, with the model on that step. |
-| Diff | Changed files, a unified diff, and `git diff` when the folder is a repository. |
-| Jobs | The queue. Progress, pause, resume, and stop. |
+| Activity | Each job with its status, and planner, coder, tester and reviewer in order. |
+| Changes | Changed files and a colored unified diff. |
 | Memory | Lessons, research notes, and facts already stored. |
 | Models | Which server is up, and which model is loaded. |
 | Approvals | A verified self-improvement, or a deploy, waiting for you. |
 
+The top bar shows whether each model server is up. The line above the prompt shows what the crew is doing right now. The line under the prompt lists only the keys that matter at that moment.
+
 | Key | Action |
 | --- | --- |
-| F1–F6 | Live, Diff, Jobs, Memory, Models, Approvals |
+| Ctrl+O | Open or close the Activity panel |
+| F1–F5 | Activity, Changes, Memory, Models, Approvals |
+| Esc | Close the panel |
+| Up / Down | Earlier messages you typed |
+| PgUp / PgDn | Scroll the chat |
 | Ctrl+P | Pause the running job |
 | Ctrl+R | Resume |
 | Ctrl+X | Stop. Files stay as they are. |
 | Ctrl+A | Keep a verified self-improvement or accept a deploy |
 | Ctrl+D | Restore the previous files |
+| Ctrl+Q | Quit |
+
+On a terminal narrower than 100 columns the panel takes the whole screen instead of sharing it. Colors come from `ui_theme` in `config.toml`: `tokyo-night` (default), `nord`, `gruvbox`, `dracula`, `catppuccin-mocha`, `textual-light`, or any other Textual theme. Setting the `VALTA_THEME` environment variable overrides it for one run.
 
 A normal build does not stop for approval. Changing Valta’s own code does, and so does a deploy. Approve keeps the edits in the project. Deny puts the previous files back. Nothing is pushed.
 

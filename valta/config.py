@@ -32,6 +32,7 @@ class Settings:
     extra_models: list[str]
     train_max_len: int = 1024
     eval_tolerance: float = 0.1
+    ui_theme: str = "tokyo-night"
 
     @property
     def data(self) -> Path:
@@ -125,6 +126,7 @@ def load_settings(root: Path | None = None) -> Settings:
         extra_models=list(raw.get("extra_models", [])),
         train_max_len=int(raw.get("train_max_len", 1024)),
         eval_tolerance=float(raw.get("eval_tolerance", 0.1)),
+        ui_theme=str(raw.get("ui_theme", "tokyo-night")),
     )
     settings.ensure_dirs()
     return settings

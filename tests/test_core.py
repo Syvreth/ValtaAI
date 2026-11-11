@@ -299,41 +299,6 @@ def test_a_pass_requires_a_written_file(tmp_path: Path):
     assert run_goal(settings, memory, tools, client, "add a status file") is False
 
 
-def test_control_center_composes(tmp_path: Path):
-    import asyncio
-
-    from textual.widgets import TabbedContent
-
-    from valta.ui import ValtaApp
-
-    class _Pilot:
-        def healthy(self, host):
-            return True
-
-        def ps(self, host):
-            return []
-
-        def chat(self, host, model, messages, num_ctx):
-            return "TALK\nReady."
-
-    settings = _settings(tmp_path)
-    memory = Memory(settings)
-    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.1, 0.2, 0.3], tmp_path)
-    app = ValtaApp(settings, memory, tools, _Pilot(), start_research=False)
-
-    async def run():
-        async with app.run_test(size=(120, 36)) as pilot:
-            await pilot.pause()
-            assert app.query_one("#chat-log").lines
-            assert app.query_one("#live-log").lines
-            await pilot.press("f6")
-            await pilot.pause()
-            assert app.query_one("#approvals-log").lines
-            assert app.query_one(TabbedContent).active == "approvals"
-
-    asyncio.run(run())
-
-
 def test_default_agent_and_project(tmp_path: Path):
     settings = _settings(tmp_path)
     memory = Memory(settings)

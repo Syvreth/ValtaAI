@@ -25,3 +25,6 @@ extra_models = []
 train_max_len = 1024
 # How far a new fine-tune may score below the current model on the coding eval and still be promoted (0.1 = 10%).
 eval_tolerance = 0.1
+
+# Terminal colors. Any Textual theme: tokyo-night, nord, gruvbox, dracula, catppuccin-mocha, textual-dark, textual-light...
+ui_theme = "tokyo-night"
