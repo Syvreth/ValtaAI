@@ -1,3 +1,4 @@
+# Install a CUDA build of torch first (pytorch.org). Plain `pip install torch` on Windows is CPU-only.
 torch
 transformers>=4.46
 peft>=0.13

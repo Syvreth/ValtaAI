@@ -333,15 +333,17 @@ def _capture_goal(memory: Memory, user_text: str) -> None:
 
 
 def _capture_correction(memory: Memory, history: list, user_text: str) -> None:
+    # Only an explicit "correction: <the right answer>" is a training target. A bare "no, that's wrong"
+    # says nothing about what the right answer is, so it must not become one.
     lowered = user_text.lower().strip()
-    if not (lowered.startswith("correction:") or lowered.startswith("no,")):
+    if not lowered.startswith("correction:"):
         return
     prior_user = ""
     for message in reversed(history):
         if message["role"] == "user":
             prior_user = message["content"]
             break
-    desired = user_text.split(":", 1)[-1].strip() if lowered.startswith("correction:") else user_text
+    desired = user_text.split(":", 1)[-1].strip()
     if prior_user and desired:
         memory.add_example(prior_user, desired)
 

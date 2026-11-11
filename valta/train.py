@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 from valta.config import Settings, load_state, save_state
+from valta.evals import EvalResult, contaminated, eval_prompts, run_eval, should_promote
 from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
 from valta.prompt import build_system, load_rules
 
+CANDIDATE_NAME = "valta-candidate"
 
 CONFLICT_PHRASES = (
     "ignore the root rules",
@@ -27,43 +30,56 @@ def conflicts_with_rules(text: str) -> bool:
 
 
 def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None = None) -> tuple[Path, list[str]]:
-    """Training text is question-answer pairs. Raw ebook text is not the corpus."""
+    """Training text is question-answer pairs. Raw ebook text is not the corpus.
+
+    Every fine-tune starts again from the base model, so the dataset is cumulative: all corrections and
+    all verified solutions ever saved, not only the new ones. Pairs that contain an eval prompt are dropped,
+    so the eval stays a fair test.
+    """
     rules = load_rules(settings)
+    blocked = eval_prompts(settings)
     pairs: list[dict] = []
     example_ids: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    dropped = 0
 
-    for row in memory.unused_examples():
-        user_text = row["user_text"]
-        assistant_text = row["assistant_text"]
-        if conflicts_with_rules(user_text) or conflicts_with_rules(assistant_text):
-            continue
+    def add(user_text: str, assistant_text: str) -> bool:
+        nonlocal dropped
+        key = (user_text.strip(), assistant_text.strip())
+        if not key[0] or not key[1] or key in seen:
+            return False
+        if conflicts_with_rules(user_text) or conflicts_with_rules(assistant_text) or contaminated(user_text, blocked):
+            dropped += 1
+            return False
+        seen.add(key)
         pairs.append(_pair(rules, user_text, assistant_text))
+        return True
+
+    for row in memory.all_examples():
+        add(row["user_text"], row["assistant_text"])
         example_ids.append(row["id"])
 
     for record in memory.recent(limit=200, kind="research"):
-        if conflicts_with_rules(record.text):
-            continue
         question = f"What did you learn about {record.title or 'this topic'}?"
-        pairs.append(_pair(rules, question, record.text))
+        add(question, record.text)
 
     if client and client.healthy(settings.heavy_host):
         for record in memory.recent(limit=20, kind="book"):
             drafted = _qa_from_passage(settings, client, record.text)
-            if not drafted or conflicts_with_rules(drafted[0]) or conflicts_with_rules(drafted[1]):
-                continue
-            pairs.append(_pair(rules, drafted[0], drafted[1]))
+            if drafted:
+                add(drafted[0], drafted[1])
 
     if not pairs:
         raise RuntimeError("Nothing to train on yet. Ingest notes, research, or correct a reply first.")
 
     settings.datasets_dir.mkdir(parents=True, exist_ok=True)
     path = settings.datasets_dir / "train.jsonl"
-    import json
 
     with path.open("w", encoding="utf-8") as handle:
         for pair in pairs:
             handle.write(json.dumps(pair, ensure_ascii=False) + "\n")
-    print(f"Wrote {len(pairs)} training pairs to {path}")
+    note = f" ({dropped} dropped for rule conflicts or eval overlap)" if dropped else ""
+    print(f"Wrote {len(pairs)} training pairs to {path}{note}")
     return path, example_ids
 
 
@@ -111,6 +127,26 @@ def render_text(messages: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def tokenize_example(tokenizer, messages: list[dict], max_len: int) -> dict | None:
+    """Tokenize one conversation with the model's own chat template, training only on the final answer.
+
+    The system and user turns are masked (-100), so the loss is not spent on the root rules that open every
+    pair. Returns None when the example is longer than max_len: a half-cut answer would teach the model to
+    never stop, so it is skipped instead.
+    """
+    prompt_text = tokenizer.apply_chat_template(messages[:-1], tokenize=False, add_generation_prompt=True)
+    full_text = tokenizer.apply_chat_template(messages, tokenize=False)
+    if not full_text.startswith(prompt_text):
+        # A template that does not nest. Train on the whole text rather than guess where the answer starts.
+        prompt_text = ""
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"] if prompt_text else []
+    full_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
+    if len(full_ids) > max_len or len(prompt_ids) >= len(full_ids):
+        return None
+    labels = [-100] * len(prompt_ids) + list(full_ids[len(prompt_ids):])
+    return {"input_ids": list(full_ids), "attention_mask": [1] * len(full_ids), "labels": labels}
+
+
 def run_qlora(settings: Settings, dataset_path: Path) -> Path:
     """QLoRA on the GTX 1660. 4-bit NF4, batch size 1, fp16, short context."""
     try:
@@ -120,28 +156,27 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
             AutoModelForCausalLM,
             AutoTokenizer,
             BitsAndBytesConfig,
-            DataCollatorForLanguageModeling,
+            DataCollatorForSeq2Seq,
             Trainer,
             TrainingArguments,
         )
     except ImportError as exc:
         raise RuntimeError(
-            "Training dependencies are missing. Install them with:\n"
-            "  pip install -r requirements-train.txt"
+            "Training dependencies are missing. Install a CUDA build of PyTorch first "
+            "(see pytorch.org for the current command), then:\n"
+            "  pip install -e \".[train]\""
         ) from exc
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. QLoRA runs on the GTX 1660.")
-
-    import json
+        hint = ""
+        if getattr(torch.version, "cuda", None) is None:
+            hint = (
+                " This PyTorch is a CPU-only build. Reinstall a CUDA build "
+                "(see pytorch.org for the current command), then run this again."
+            )
+        raise RuntimeError("CUDA is not available. QLoRA runs on the GTX 1660." + hint)
 
     from datasets import Dataset
-
-    rows = []
-    for line in dataset_path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append({"text": render_text(json.loads(line)["messages"])})
-    dataset = Dataset.from_list(rows)
 
     compute = torch.float16
     quant = BitsAndBytesConfig(
@@ -153,6 +188,27 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
     tokenizer = AutoTokenizer.from_pretrained(settings.hf_base)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    rows = []
+    skipped = 0
+    for line in dataset_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        item = tokenize_example(tokenizer, json.loads(line)["messages"], settings.train_max_len)
+        if item is None:
+            skipped += 1
+        else:
+            rows.append(item)
+    if skipped:
+        print(f"Skipped {skipped} example(s) longer than train_max_len={settings.train_max_len} tokens.")
+    if not rows:
+        raise RuntimeError(
+            f"Every example is longer than train_max_len={settings.train_max_len} tokens. "
+            "Raise it in config.toml, or shorten the data. A 6 GB card cannot take much more than 2048."
+        )
+    print(f"Training on {len(rows)} example(s).")
+    dataset = Dataset.from_list(rows)
+
     model = AutoModelForCausalLM.from_pretrained(
         settings.hf_base,
         quantization_config=quant,
@@ -173,10 +229,6 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
         ),
     )
 
-    def tokenize(batch):
-        return tokenizer(batch["text"], truncation=True, max_length=settings.self_num_ctx)
-
-    tokenized = dataset.map(tokenize, remove_columns=dataset.column_names)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     output = settings.adapters_dir / stamp
     output.mkdir(parents=True, exist_ok=True)
@@ -197,8 +249,8 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
     trainer = Trainer(
         model=model,
         args=args,
-        train_dataset=tokenized,
-        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+        train_dataset=dataset,
+        data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True, label_pad_token_id=-100, pad_to_multiple_of=8),
     )
     trainer.train()
     model.save_pretrained(output)
@@ -251,6 +303,10 @@ def convert_to_gguf(merged_dir: Path, gguf_path: Path) -> Path:
     return gguf_path
 
 
+def modelfile_text(settings: Settings, gguf_path: Path) -> str:
+    return f"FROM {gguf_path.as_posix()}\nPARAMETER num_ctx {settings.self_num_ctx}\n"
+
+
 def write_modelfile(settings: Settings, gguf_path: Path) -> str:
     current = settings.models_dir / "valta.Modelfile"
     previous = settings.models_dir / "valta.previous.Modelfile"
@@ -259,7 +315,7 @@ def write_modelfile(settings: Settings, gguf_path: Path) -> str:
         state = load_state(settings)
         state["previous_modelfile"] = str(previous)
         save_state(settings, state)
-    modelfile = f"FROM {gguf_path.as_posix()}\nPARAMETER num_ctx {settings.self_num_ctx}\n"
+    modelfile = modelfile_text(settings, gguf_path)
     current.write_text(modelfile, encoding="utf-8")
     return modelfile
 
@@ -270,6 +326,67 @@ def create_valta(settings: Settings, client: OllamaClient, modelfile: str) -> No
     state["personal_model"] = "valta"
     save_state(settings, state)
     print("Personal model is now `valta` on the GTX 1660.")
+
+
+def baseline_model(settings: Settings) -> str:
+    """The model the next fine-tune has to beat: whatever personal model is active now."""
+    return load_state(settings).get("personal_model") or settings.self_model
+
+
+def score_baseline(settings: Settings, client: OllamaClient) -> EvalResult:
+    model = baseline_model(settings)
+    print(f"Scoring the current personal model ({model}) before training...")
+    result = run_eval(settings, client, settings.self_host, model, on_progress=_progress)
+    print(result.summary())
+    return result
+
+
+def gate_candidate(
+    settings: Settings,
+    client: OllamaClient,
+    modelfile: str,
+    baseline: EvalResult | None,
+) -> tuple[bool, EvalResult, str]:
+    """Load the new weights under a temporary name, score them, and decide. Nothing is replaced yet."""
+    client.create(settings.self_host, CANDIDATE_NAME, modelfile)
+    try:
+        print("Scoring the new model...")
+        candidate = run_eval(settings, client, settings.self_host, CANDIDATE_NAME, on_progress=_progress)
+    finally:
+        try:
+            client.delete(settings.self_host, CANDIDATE_NAME)
+        except OllamaError:
+            pass
+    print(candidate.summary())
+    promote, reason = should_promote(baseline, candidate, settings.eval_tolerance)
+    return promote, candidate, reason
+
+
+def record_eval(
+    settings: Settings,
+    adapter: str,
+    baseline: EvalResult | None,
+    candidate: EvalResult,
+    promoted: bool,
+) -> None:
+    state = load_state(settings)
+    history = list(state.get("eval_history", []))
+    history.append(
+        {
+            "adapter": adapter,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "baseline_model": baseline.model if baseline else None,
+            "baseline": baseline.score if baseline else None,
+            "candidate": candidate.score,
+            "promoted": promoted,
+        }
+    )
+    state["eval_history"] = history[-50:]
+    save_state(settings, state)
+
+
+def _progress(task_id: str, ok: bool, note: str) -> None:
+    print(f"  {'pass' if ok else 'FAIL'}  {task_id}" + (f"  ({note})" if note and not ok else ""), flush=True)
 
 
 def rollback(settings: Settings, client: OllamaClient) -> None:
@@ -292,6 +409,7 @@ def free_training_gpu(settings: Settings, client: OllamaClient) -> None:
     state = load_state(settings)
     names.append(state.get("personal_model") or settings.self_model)
     names.append("valta")
+    names.append(CANDIDATE_NAME)
     seen = set()
     for name in names:
         short = name.split(":")[0] if name else ""

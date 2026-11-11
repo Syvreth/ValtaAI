@@ -15,14 +15,20 @@ from valta.prompt import load_rules
 from valta.research import research_once
 from valta.status import project_status
 from valta.tools import ToolRunner
+from valta.evals import run_eval
 from valta.train import (
+    baseline_model,
     build_pairs,
     convert_to_gguf,
     create_valta,
     free_training_gpu,
+    gate_candidate,
     merge_adapter,
+    modelfile_text,
+    record_eval,
     rollback,
     run_qlora,
+    score_baseline,
     write_modelfile,
 )
 from valta.vectors import Vectors
@@ -195,12 +201,36 @@ def models_pull():
         typer.echo("The GTX 1660 server is down, so the 3B was not pulled.")
 
 
+@app.command("eval")
+def eval_cmd(
+    model: str = typer.Option("", "--model", help="Model name. Defaults to the active personal model."),
+    teacher: bool = typer.Option(False, "--teacher", help="Score the teacher on the RX 6600 server instead."),
+):
+    """Score a model on the built-in coding eval (plus any tasks in data/evals/)."""
+    settings = load_settings()
+    client = OllamaClient(settings)
+    host = settings.heavy_host if teacher else settings.self_host
+    name = model or (settings.teacher_model if teacher else baseline_model(settings))
+    if not client.healthy(host):
+        raise typer.BadParameter(f"The server at {host} is down. Run scripts/start-ollama.ps1.")
+
+    def show(task_id: str, ok: bool, note: str) -> None:
+        typer.echo(f"  {'pass' if ok else 'FAIL'}  {task_id}" + (f"  ({note})" if note and not ok else ""))
+
+    try:
+        result = run_eval(settings, client, host, name, on_progress=show)
+    except OllamaError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(result.summary())
+
+
 @app.command()
 def train(
     rollback_model: bool = typer.Option(False, "--rollback", help="Restore the previous valta Modelfile."),
     create_only: bool = typer.Option(False, "--create-only", help="Register an existing GGUF as valta."),
+    skip_eval: bool = typer.Option(False, "--skip-eval", help="Promote the new model without scoring it first."),
 ):
-    """Fine-tune the 3B on the GTX 1660, then `ollama create valta`."""
+    """Fine-tune the 3B on the GTX 1660, score it, and replace `valta` only if it did not get worse."""
     settings, memory, _tools, client = _stack()
     if rollback_model:
         rollback(settings, client)
@@ -212,20 +242,47 @@ def train(
         modelfile = write_modelfile(settings, Path(gguf))
         create_valta(settings, client, modelfile)
         return
+    if not skip_eval and not client.healthy(settings.self_host):
+        raise typer.BadParameter(
+            "The GTX 1660 server is down. It is needed to score the new model. "
+            "Run scripts/start-ollama.ps1, or pass --skip-eval to promote without scoring."
+        )
     waiting = memory.example_count()
     if waiting < settings.train_threshold:
         typer.echo(
-            f"{waiting} correction(s) queued. The threshold is {settings.train_threshold}. Training with what exists."
+            f"{waiting} new example(s) queued. The threshold is {settings.train_threshold}. Training with what exists."
         )
     try:
         dataset, example_ids = build_pairs(settings, memory, client)
     except RuntimeError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    baseline = None
+    if not skip_eval:
+        try:
+            baseline = score_baseline(settings, client)
+        except OllamaError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     free_training_gpu(settings, client)
     adapter = run_qlora(settings, dataset)
     merged = merge_adapter(settings, adapter)
     gguf_path = settings.models_dir / f"{adapter.name}.gguf"
     gguf = convert_to_gguf(merged, gguf_path)
+    candidate_modelfile = modelfile_text(settings, gguf)
+    if skip_eval:
+        modelfile = write_modelfile(settings, gguf)
+        create_valta(settings, client, modelfile)
+        memory.mark_examples_used(example_ids)
+        return
+    try:
+        promote, candidate, reason = gate_candidate(settings, client, candidate_modelfile, baseline)
+    except OllamaError as exc:
+        raise typer.BadParameter(f"Could not score the new model, so `valta` was left as it was. {exc}") from exc
+    record_eval(settings, adapter.name, baseline, candidate, promote)
+    if not promote:
+        typer.echo(f"Not promoted. {reason}")
+        typer.echo(f"The weights are kept at {gguf}. `valta` is unchanged.")
+        return
+    typer.echo(f"Promoting. {reason}")
     modelfile = write_modelfile(settings, gguf)
     create_valta(settings, client, modelfile)
     memory.mark_examples_used(example_ids)

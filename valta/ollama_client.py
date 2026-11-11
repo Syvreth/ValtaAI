@@ -39,14 +39,21 @@ class OllamaClient:
         response.raise_for_status()
         return list(response.json().get("models", []))
 
-    def chat(self, host: str, model: str, messages: list[dict[str, str]], num_ctx: int) -> str:
+    def chat(
+        self,
+        host: str,
+        model: str,
+        messages: list[dict[str, str]],
+        num_ctx: int,
+        temperature: float = 0.4,
+    ) -> str:
         response = httpx.post(
             f"{host}/api/chat",
             json={
                 "model": model,
                 "messages": messages,
                 "stream": False,
-                "options": {"num_ctx": num_ctx, "temperature": 0.4},
+                "options": {"num_ctx": num_ctx, "temperature": temperature},
             },
             timeout=self.timeout,
         )
@@ -104,6 +111,14 @@ class OllamaClient:
             )
         except httpx.HTTPError as exc:
             raise OllamaError(f"Could not unload {model} on {host}: {exc}") from exc
+
+    def delete(self, host: str, name: str) -> None:
+        try:
+            response = httpx.request("DELETE", f"{host}/api/delete", json={"model": name}, timeout=60)
+        except httpx.HTTPError as exc:
+            raise OllamaError(f"Could not delete {name} on {host}: {exc}") from exc
+        if response.status_code >= 400 and response.status_code != 404:
+            raise OllamaError(f"delete {name} failed ({response.status_code}): {response.text[:400]}")
 
     def create(self, host: str, name: str, modelfile: str) -> None:
         with httpx.stream(

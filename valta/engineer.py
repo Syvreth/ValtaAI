@@ -146,12 +146,13 @@ def run_goal(
     test_output = ""
     passed = False
     stopped = False
+    writes: dict[str, str] = {}
     try:
         for round_index in range(settings.repair_rounds + 1):
             _checkpoint(control)
             if round_index:
                 _emit(on_event, "repair", f"Attempt {round_index + 1}. {feedback}")
-            summary, wrote = _coder_round(settings, client, tools, goal, plan, feedback, on_event, control)
+            summary, wrote = _coder_round(settings, client, tools, goal, plan, feedback, on_event, control, writes)
             _checkpoint(control)
             test_output = _run_checks(tools, test_cmd)
             _emit(on_event, "tester", test_output)
@@ -178,6 +179,8 @@ def run_goal(
         stopped = True
         _emit(on_event, "valta", "Stopped.")
     status = "stopped" if stopped else "passed" if passed else "failed"
+    if passed:
+        _save_verified_example(settings, memory, tools, goal, writes)
     tools.save_note(
         text=f"Goal: {goal}\nStatus: {status}\nSummary: {summary}\n\n{test_output}",
         title=goal[:200],
@@ -188,7 +191,32 @@ def run_goal(
     return passed
 
 
-def _coder_round(settings, client, tools, goal, plan, feedback, on_event=None, control=None) -> tuple[str, bool]:
+VERIFIED_MAX_CHARS = 4000
+
+
+def format_solution(writes: dict[str, str]) -> str:
+    """The answer a model should give for a goal: each file, in a fenced block under its path."""
+    return "\n\n".join(f"{path}\n```\n{content}\n```" for path, content in writes.items())
+
+
+def _save_verified_example(settings, memory, tools, goal: str, writes: dict[str, str]) -> None:
+    """A job whose tests and reviewer both passed is a verified (goal, solution) pair for fine-tuning.
+
+    Valta's own code is skipped here: those edits wait for approval and can be denied and restored.
+    """
+    if not writes:
+        return
+    if tools.project.resolve() == settings.root.resolve():
+        return
+    answer = format_solution(writes)
+    if len(answer) > VERIFIED_MAX_CHARS or memory.example_exists(goal, answer):
+        return
+    memory.add_example(goal, answer, source_id="verified")
+
+
+def _coder_round(
+    settings, client, tools, goal, plan, feedback, on_event=None, control=None, writes=None
+) -> tuple[str, bool]:
     history = [{"role": "user", "content": f"Goal:\n{goal}\n\nPlan:\n{plan}\n\n{feedback}\n\n{ACTION_HELP}"}]
     summary = ""
     wrote = False
@@ -220,6 +248,8 @@ def _coder_round(settings, client, tools, goal, plan, feedback, on_event=None, c
                 result = _execute(tools, action)
                 if action.name == "write_file" and str(result).startswith("Wrote "):
                     wrote = True
+                    if writes is not None:
+                        writes[action.path] = action.content
             detail = action.path or action.command or action.query or action.name
             _emit(on_event, "coder", f"{action.name} {detail}\n{result}")
         history.append({"role": "assistant", "content": reply})

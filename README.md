@@ -115,10 +115,11 @@ Build me a calculator.
 
 Work is written into the folder you launched from. Books and research go into local memory, not into that folder. To build somewhere else, start Valta from that directory.
 
-Training extras, when you want a real QLoRA run on the smaller card:
+Training extras, when you want a real QLoRA run on the smaller card. Install a CUDA build of PyTorch first (pytorch.org has the current command). A plain `pip install torch` on Windows gives the CPU build, and training will stop with a message saying so.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[train]"
+.\.venv\Scripts\valta.exe eval        # score the current personal model first
 .\.venv\Scripts\valta.exe train
 ```
 
@@ -140,7 +141,8 @@ Opening `valta` with no command is the control center. The commands below are th
 | `valta memory` | List stored records. |
 | `valta forget <id>` | Delete one record and its vector. |
 | `valta rules` | Print the root rules that are loaded. |
-| `valta train` | Build pairs, QLoRA the 3B, then `ollama create valta`. |
+| `valta eval` | Score a model on the coding eval. `--teacher` scores the 7B instead. |
+| `valta train` | Build pairs, QLoRA the 3B, score it, and replace `valta` only if it did not get worse. `--skip-eval` promotes without scoring. |
 
 From the chat itself, Valta can decide to ingest a path you mention, research a topic, or start a job. You do not have to switch commands.
 
@@ -150,7 +152,26 @@ SQLite (`data/valta.db`) is the source of truth. Chroma (`data/chroma`) stores v
 
 Background research starts with the control center. It waits so your first message gets the GPU, then rotates through a topic queue, `data/interests.txt`, and headings from books you have ingested. Notes keep the source URL.
 
-Fine-tuning does not train on raw books. It builds question-and-answer pairs from corrections, research notes, and a small sample of book chunks. Pairs that conflict with the root rules are dropped. The system text of each pair is the current root rules.
+Fine-tuning does not train on raw books. It builds question-and-answer pairs from corrections, verified solutions, research notes, and a small sample of book chunks. Pairs that conflict with the root rules are dropped. The system text of each pair is the current root rules.
+
+Two kinds of example are saved as you work:
+
+- **Corrections.** Start a message with `correction:` and the right answer. A bare "no, that's wrong" is not saved, because it does not say what the right answer is.
+- **Verified solutions.** When a job passes its tests and the reviewer says PASS, the goal and the files it wrote are saved. Jobs that change Valta's own code are skipped, since those wait for your approval and can be denied.
+
+Every fine-tune starts again from the base model, so each run trains on all examples ever saved, not only the new ones. Training uses the model's own chat template and learns only from the answer. The root rules at the top of each pair are masked out. Examples longer than `train_max_len` tokens are skipped instead of cut.
+
+## Does it get better?
+
+`valta eval` asks a model for twelve small Python functions at temperature 0 and runs each reply against hidden asserts. Add your own tasks as JSON in `data/evals/` (`[{"id", "prompt", "tests"}]`; `tests` runs after `from solution import *`). Training pairs that contain an eval prompt are dropped, so the eval stays a fair test.
+
+`valta train` scores the current personal model, trains, loads the result as `valta-candidate`, and scores it. It replaces `valta` only if the score is within `eval_tolerance` of the old one or better. Scores are kept in `data/state.json` under `eval_history`.
+
+Limits worth knowing:
+
+- Twelve tasks is a small sample, so one task is about 8 points. Treat a single run as a hint and look at the history.
+- It measures coding, not personal conversation, which is what the 3B is routed for. It catches regressions. It does not prove the personal model got better at knowing you.
+- Replies are run as Python in a temporary folder with a 10 second timeout and a clean environment. That is not a sandbox, the same trust level as the test runs the crew already does.
 
 ## What stays off GitHub
 

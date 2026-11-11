@@ -30,6 +30,8 @@ class Settings:
     work_max_steps: int
     repair_rounds: int
     extra_models: list[str]
+    train_max_len: int = 1024
+    eval_tolerance: float = 0.1
 
     @property
     def data(self) -> Path:
@@ -75,6 +77,10 @@ class Settings:
     def datasets_dir(self) -> Path:
         return self.data / "datasets"
 
+    @property
+    def evals_dir(self) -> Path:
+        return self.data / "evals"
+
     def ensure_dirs(self) -> None:
         for path in (
             self.library,
@@ -83,6 +89,7 @@ class Settings:
             self.adapters_dir,
             self.merged_dir,
             self.datasets_dir,
+            self.evals_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
         if not self.interests_path.exists():
@@ -116,6 +123,8 @@ def load_settings(root: Path | None = None) -> Settings:
         work_max_steps=int(raw.get("work_max_steps", 8)),
         repair_rounds=int(raw.get("repair_rounds", 2)),
         extra_models=list(raw.get("extra_models", [])),
+        train_max_len=int(raw.get("train_max_len", 1024)),
+        eval_tolerance=float(raw.get("eval_tolerance", 0.1)),
     )
     settings.ensure_dirs()
     return settings

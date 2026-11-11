@@ -20,3 +20,8 @@ work_max_steps = 8
 repair_rounds = 2
 
 extra_models = []
+
+# Longest training example in tokens. A 6 GB card cannot take much more than 2048.
+train_max_len = 1024
+# How far a new fine-tune may score below the current model on the coding eval and still be promoted (0.1 = 10%).
+eval_tolerance = 0.1

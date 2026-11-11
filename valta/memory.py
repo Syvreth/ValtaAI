@@ -255,6 +255,17 @@ class Memory:
             self.conn.commit()
         return example_id
 
+    def all_examples(self) -> list[sqlite3.Row]:
+        """Every example, used or not. Each fine-tune starts from the base model, so it must see them all."""
+        return self.conn.execute("SELECT * FROM training_examples ORDER BY created_at").fetchall()
+
+    def example_exists(self, user_text: str, assistant_text: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM training_examples WHERE user_text = ? AND assistant_text = ? LIMIT 1",
+            (user_text, assistant_text),
+        ).fetchone()
+        return row is not None
+
     def unused_examples(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM training_examples WHERE used = 0 ORDER BY created_at"
