@@ -119,6 +119,69 @@ def test_job_diff_and_deny_restores(tmp_path: Path):
     assert not (target / "new.py").exists()
 
 
+def test_deny_restores_exact_bytes_and_skips_heavy_folders(tmp_path: Path):
+    from valta.jobs import diff_since, restore, snapshot
+
+    target = tmp_path / "proj"
+    target.mkdir()
+    lf = b"a = 1\nb = 2\n"
+    latin = "caf\xe9\n".encode("latin-1")
+    (target / "lf.py").write_bytes(lf)
+    (target / "latin.txt").write_bytes(latin)
+    (target / "node_modules" / "pkg").mkdir(parents=True)
+    (target / "node_modules" / "pkg" / "index.js").write_bytes(b"x")
+    before = snapshot(target)
+    assert not any(rel.startswith("node_modules/") for rel in before)
+    (target / "lf.py").write_bytes(b"a = 9\n")
+    (target / "latin.txt").write_bytes(b"changed\n")
+    diff, changed = diff_since(target, before)
+    assert set(changed) == {"lf.py", "latin.txt"}
+    restore(target, before)
+    assert (target / "lf.py").read_bytes() == lf
+    assert (target / "latin.txt").read_bytes() == latin
+    assert (target / "node_modules" / "pkg" / "index.js").read_bytes() == b"x"
+
+
+def test_work_in_valtas_own_folder_waits_for_approval(tmp_path: Path):
+    from valta.jobs import JobManager
+
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.1, 0.2], settings.root)
+    manager = JobManager(settings, memory, tools, client=None)
+    assert manager.enqueue("work", "Build me a calculator").sensitive
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    assert not manager.enqueue("work", "Build me a calculator", elsewhere).sensitive
+    assert manager.enqueue("work", "improve your own code", elsewhere).sensitive
+
+
+def test_coder_history_keeps_the_goal():
+    from valta.engineer import _trim_history
+
+    history = [{"role": "user", "content": "Goal and plan"}]
+    for step in range(10):
+        history.append({"role": "assistant", "content": f"reply {step}"})
+        history.append({"role": "user", "content": f"result {step}"})
+        history = _trim_history(history)
+    assert history[0]["content"] == "Goal and plan"
+    assert history[-1]["content"] == "result 9"
+    roles = [message["role"] for message in history]
+    assert all(a != b for a, b in zip(roles, roles[1:]))
+
+
+def test_file_shortcut_never_overwrites_an_existing_file(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "utils.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], project)
+    for request in ("Add a docstring to utils.py", "Write tests for utils.py", "Create a file called utils.py"):
+        assert write_requested_file(request, settings, memory, tools) is None
+    assert (project / "utils.py").read_text(encoding="utf-8") == "def f():\n    return 1\n"
+
+
 def test_named_file_is_written_where_asked(tmp_path: Path):
     settings = _settings(tmp_path)
     memory = Memory(settings)

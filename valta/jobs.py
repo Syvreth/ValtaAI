@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 import subprocess
 import threading
 import uuid
@@ -11,8 +12,26 @@ from valta.chat import _owns_the_work
 from valta.control import JobControl, JobStopped
 from valta.engineer import run_goal
 
-SKIP_DIRS = {".venv", ".git", "data", "__pycache__", ".pytest_cache", "chroma"}
+SKIP_DIRS = {
+    ".venv",
+    "venv",
+    ".git",
+    "data",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "chroma",
+    "node_modules",
+    ".next",
+    "dist",
+    "build",
+    "target",
+}
 SKIP_SUFFIXES = {".png", ".gguf", ".db", ".bin", ".pyc"}
+# Files above this size are left out of the snapshot. They are neither restored nor deleted on deny.
+SNAPSHOT_MAX_BYTES = 2_000_000
 
 
 @dataclass
@@ -27,7 +46,7 @@ class Job:
     sensitive: bool = False
     control: JobControl = field(default_factory=JobControl)
     project: Path = field(default_factory=Path.cwd)
-    before: dict[str, str] = field(default_factory=dict)
+    before: dict[str, bytes] = field(default_factory=dict)
 
 
 class JobManager:
@@ -54,7 +73,7 @@ class JobManager:
             id=uuid.uuid4().hex[:8],
             kind=kind,
             goal=goal,
-            sensitive=kind == "deploy" or (kind == "work" and _owns_the_work(goal)),
+            sensitive=kind == "deploy" or (kind == "work" and self._touches_valta(goal, target)),
             project=target,
         )
         with self._lock:
@@ -65,6 +84,19 @@ class JobManager:
                 self.jobs.append(job)
         self._wake.set()
         return job
+
+    def _touches_valta(self, goal: str, project: Path) -> bool:
+        """Work on Valta's own code waits for approval, however the goal is worded.
+
+        Launching Valta from its own folder makes that folder the project, so a plain
+        "build me a calculator" would otherwise edit Valta without asking.
+        """
+        if _owns_the_work(goal):
+            return True
+        try:
+            return Path(project).resolve() == Path(self.settings.root).resolve()
+        except OSError:
+            return False
 
     def running(self) -> Job | None:
         with self._lock:
@@ -203,38 +235,59 @@ def short_model(name: str) -> str:
     return tail.replace(":Q4_K_M", "").replace("-GGUF", "")[:32]
 
 
-def snapshot(root: Path) -> dict[str, str]:
-    saved: dict[str, str] = {}
-    if not root.exists():
+def snapshot(root: Path) -> dict[str, bytes]:
+    """Exact bytes of every project file worth restoring, keyed by POSIX relative path.
+
+    Bytes, not text: a decode and re-encode would garble non-UTF-8 files and, on Windows,
+    turn LF line endings into CRLF when the files are put back.
+    """
+    saved: dict[str, bytes] = {}
+    if not root.is_dir():
         return saved
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root)
-        if any(part in SKIP_DIRS for part in relative.parts):
-            continue
-        if path.suffix.lower() in SKIP_SUFFIXES:
-            continue
-        if path.stat().st_size > 500_000:
-            continue
-        saved[relative.as_posix()] = path.read_text(encoding="utf-8", errors="replace")
+    for current, dirs, files in os.walk(root):
+        # Prune in place so os.walk never descends into node_modules, .venv and the like.
+        dirs[:] = [name for name in dirs if name not in SKIP_DIRS]
+        for name in files:
+            path = Path(current) / name
+            if path.suffix.lower() in SKIP_SUFFIXES or path.is_symlink():
+                continue
+            try:
+                if path.stat().st_size > SNAPSHOT_MAX_BYTES:
+                    continue
+                data = path.read_bytes()
+            except OSError:
+                continue
+            saved[path.relative_to(root).as_posix()] = data
     return saved
 
 
-def diff_since(root: Path, before: dict[str, str]) -> tuple[str, list[str]]:
+def _diff_lines(data: bytes | None) -> list[str] | None:
+    """Lines to show in a diff, or None for a binary file."""
+    if not data:
+        return []
+    if b"\0" in data:
+        return None
+    return data.decode("utf-8", errors="replace").splitlines()
+
+
+def diff_since(root: Path, before: dict[str, bytes]) -> tuple[str, list[str]]:
     after = snapshot(root)
     changed: list[str] = []
     chunks: list[str] = []
     for rel in sorted(set(before) | set(after)):
-        old = before.get(rel, "")
-        new = after.get(rel, "")
+        old = before.get(rel)
+        new = after.get(rel)
         if old == new:
             continue
         changed.append(rel)
+        old_lines, new_lines = _diff_lines(old), _diff_lines(new)
+        if old_lines is None or new_lines is None:
+            chunks.append(f"Binary file {rel} changed")
+            continue
         chunks.extend(
             difflib.unified_diff(
-                old.splitlines(),
-                new.splitlines(),
+                old_lines,
+                new_lines,
                 fromfile=f"a/{rel}",
                 tofile=f"b/{rel}",
                 lineterm="",
@@ -265,14 +318,13 @@ def git_diff(root: Path) -> str:
     return completed.stdout[-20000:]
 
 
-def restore(root: Path, before: dict[str, str]) -> None:
+def restore(root: Path, before: dict[str, bytes]) -> None:
     after = snapshot(root)
-    for rel, text in before.items():
-        path = root / rel
-        current = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
-        if current != text:
+    for rel, data in before.items():
+        if after.get(rel) != data:
+            path = root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            path.write_bytes(data)
     for rel in after:
         if rel not in before:
             (root / rel).unlink(missing_ok=True)
