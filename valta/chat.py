@@ -1,13 +1,29 @@
 from __future__ import annotations
 
+import re
 import threading
+from pathlib import Path
 
 from valta.config import Settings, load_state
+from valta.engineer import parse_action, run_goal
+from valta.ingest import ingest_path
 from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
 from valta.prompt import build_system
-from valta.research import research_loop
+from valta.research import research_loop, research_once
 from valta.tools import ToolRunner
+
+CHAT_ROLE = """
+You are Valta, in one ongoing chat. The user should not have to run commands.
+The first line of every reply is exactly one of:
+TALK
+INGEST <path>
+RESEARCH <topic>
+WORK <goal>
+Use TALK when they are conversing. Use INGEST when they want a file or folder read into memory. Use RESEARCH when they want you to look something up. Use WORK when they want software created or changed. If the first line is TALK, the rest of the reply is what you say. If it is a task, the first line is the whole reply.
+""".strip()
+
+_DOC_SUFFIXES = {".pdf", ".epub", ".txt", ".md", ".markdown"}
 
 BUILD_CUES = (
     "code",
@@ -37,6 +53,81 @@ PERSONAL_CUES = (
 )
 
 
+def find_docs(text: str) -> list[Path]:
+    raw_candidates = re.findall(r'"([^"]+)"', text)
+    raw_candidates += re.findall(r"[A-Za-z]:\\[^\r\n\"']+", text)
+    stripped = text.strip().strip('"')
+    if stripped:
+        raw_candidates.append(stripped)
+    found: list[Path] = []
+    seen: set[str] = set()
+    for raw in raw_candidates:
+        path = Path(raw.strip().rstrip(".,)")).expanduser()
+        if path.suffix.lower() not in _DOC_SUFFIXES or not path.exists():
+            continue
+        key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            found.append(path)
+    return found
+
+
+def interpret(answer: str) -> tuple[str, str, str]:
+    """Return kind, argument, and the spoken text when the reply is just conversation."""
+    cleaned = answer.strip()
+    if not cleaned:
+        return "talk", "", ""
+    line, _, rest = cleaned.partition("\n")
+    line = line.strip()
+    upper = line.upper()
+    if upper == "TALK":
+        return "talk", "", rest.strip()
+    for kind in ("INGEST ", "RESEARCH ", "WORK "):
+        if upper.startswith(kind):
+            return kind.strip().lower(), line.split(" ", 1)[1].strip().strip('"'), ""
+    action = parse_action(cleaned)
+    if action and action.name in {"ingest", "research", "work"}:
+        return action.name, action.path or action.query, ""
+    return "talk", "", cleaned
+
+
+def read_mentioned_files(text: str, settings: Settings, memory: Memory, tools: ToolRunner) -> list[str]:
+    notes = []
+    for path in find_docs(text):
+        count = ingest_path(path, settings, memory, tools)
+        if count:
+            notes.append(f"Read {count} chunks from {path}.")
+        else:
+            notes.append(f"{path.name} was already in memory.")
+    return notes
+
+
+def perform_task(kind: str, arg: str, settings: Settings, memory: Memory, tools: ToolRunner, client: OllamaClient) -> str:
+    if kind == "ingest":
+        count = ingest_path(Path(arg.strip().strip('"')), settings, memory, tools)
+        if count:
+            return f"Read {count} chunks from {arg}."
+        return f"{arg} was already in memory or had no text."
+    if kind == "research":
+        filed = research_once(settings, memory, tools, client, topic=arg)
+        return f"Filed {filed} notes about {arg}."
+    if kind == "work":
+        project = settings.root if _owns_the_work(arg) else tools.project
+        runner = tools if project.resolve() == tools.project.resolve() else ToolRunner(
+            settings, memory, tools.vectors, tools.embedder, project
+        )
+        passed = run_goal(settings, memory, runner, client, arg)
+        if passed:
+            return f"Finished: {arg}"
+        return f"Could not finish cleanly: {arg}"
+    return ""
+
+
+def _owns_the_work(goal: str) -> bool:
+    lowered = goal.lower()
+    return any(phrase in lowered for phrase in ("your code", "yourself", "your own", "valta itself"))
+
+
 def route_message(text: str, personal_ready: bool) -> str:
     lowered = text.lower()
     if any(cue in lowered for cue in BUILD_CUES):
@@ -62,26 +153,47 @@ def reply_once(settings: Settings, memory: Memory, tools: ToolRunner, client: Ol
     route = route_message(user_text, personal_ready)
     if route == "personal":
         host, model, num_ctx = settings.self_host, personal_model, settings.self_num_ctx
-        role = "You are Valta's personal model. Talk about the user from memory."
+        role = "You are Valta's personal model. Talk about the user from memory.\n" + CHAT_ROLE
     else:
         host, model, num_ctx = settings.heavy_host, settings.teacher_model, settings.teacher_num_ctx
-        role = "You are Valta. Help with research and with building software."
+        role = CHAT_ROLE
     if not client.healthy(host):
         raise OllamaError(
             f"Ollama is not running at {host}. Start both servers with scripts/start-ollama.ps1."
         )
+    notes = read_mentioned_files(user_text, settings, memory, tools)
+    if notes:
+        user_text = user_text + "\n\n" + "\n".join(notes)
     records = tools.search_memory(user_text)
     system = build_system(settings, role=role, memory_blocks=_format_memory(records))
     messages = [{"role": "system", "content": system}, *history[-8:], {"role": "user", "content": user_text}]
     answer = client.chat(host, model, messages, num_ctx)
-    tools.save_note(text=answer, title=user_text[:200], kind="chat")
+    kind, arg, spoken = interpret(answer)
+    if kind == "talk":
+        final = spoken or answer
+    else:
+        try:
+            result = perform_task(kind, arg, settings, memory, tools, client)
+        except (OSError, OllamaError, ValueError) as exc:
+            result = str(exc)
+        final = client.chat(
+            host,
+            model,
+            [
+                {"role": "system", "content": build_system(settings, role="Tell the user what you just did. Plain sentences. Do not emit a task line.")},
+                {"role": "user", "content": result},
+            ],
+            num_ctx,
+        )
+        final = interpret(final)[2] or final
+    tools.save_note(text=final, title=user_text[:200], kind="chat")
     _capture_goal(memory, user_text)
     _capture_correction(memory, history, user_text)
-    _capture_uncertainty(memory, user_text, answer)
-    _capture_facts(settings, client, host, model, num_ctx, tools, user_text, answer)
+    _capture_uncertainty(memory, user_text, final)
+    _capture_facts(settings, client, host, model, num_ctx, tools, user_text, final)
     history.append({"role": "user", "content": user_text})
-    history.append({"role": "assistant", "content": answer})
-    return answer
+    history.append({"role": "assistant", "content": final})
+    return final
 
 
 def _capture_goal(memory: Memory, user_text: str) -> None:
@@ -138,7 +250,22 @@ def chat_loop(settings: Settings, memory: Memory, tools: ToolRunner, client: Oll
     memory.ensure_default_agent()
     memory.ensure_project(tools.project)
     history: list[dict] = []
-    print("Valta. /exit to leave, /read <path>, /ls <path>.")
+    stop = threading.Event()
+    worker = threading.Thread(
+        target=research_loop,
+        args=(settings, memory, tools, client, stop),
+        kwargs={"delay_first": True},
+        daemon=True,
+    )
+    worker.start()
+    print("Valta. Talk normally. Mention a file path and it will be read. /exit leaves.")
+    try:
+        _chat_turns(settings, memory, tools, client, history)
+    finally:
+        stop.set()
+
+
+def _chat_turns(settings, memory, tools, client, history: list[dict]) -> None:
     while True:
         try:
             user_text = input("You: ").strip()
@@ -172,14 +299,4 @@ def chat_loop(settings: Settings, memory: Memory, tools: ToolRunner, client: Oll
 
 
 def live(settings: Settings, memory: Memory, tools: ToolRunner, client: OllamaClient) -> None:
-    stop = threading.Event()
-    worker = threading.Thread(
-        target=research_loop,
-        args=(settings, memory, tools, client, stop),
-        daemon=True,
-    )
-    worker.start()
-    try:
-        chat_loop(settings, memory, tools, client)
-    finally:
-        stop.set()
+    chat_loop(settings, memory, tools, client)

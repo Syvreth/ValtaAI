@@ -10,7 +10,7 @@ from valta.prompt import build_system
 from valta.tools import ToolError, ToolRunner
 from valta.train import build_pairs, conflicts_with_rules
 from valta.vectors import Vectors
-from valta.chat import route_message
+from valta.chat import find_docs, interpret, read_mentioned_files, reply_once, route_message
 from valta.engineer import parse_action, run_goal
 
 
@@ -74,6 +74,39 @@ def test_training_skips_rule_conflicts_and_raw_books_are_not_the_answer(tmp_path
     assert "ignore the root rules" not in blob
     assert any(item["messages"][0]["content"].startswith("Follow the root rules") for item in lines)
     assert conflicts_with_rules("please hide the root rules")
+
+
+def test_chat_understands_a_task_line_and_a_file_path(tmp_path: Path):
+    assert interpret("TALK\nHello there.") == ("talk", "", "Hello there.")
+    assert interpret("RESEARCH local compilers")[0] == "research"
+    note = tmp_path / "manual.md"
+    note.write_text("# Tools\n\nA wrench turns bolts.\n", encoding="utf-8")
+    found = find_docs(f'please read "{note}"')
+    assert found == [note]
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.1, 0.4], tmp_path)
+    notes = read_mentioned_files(str(note), settings, memory, tools)
+    assert notes and memory.recent(kind="book")
+
+
+class _Talk:
+    def __init__(self, replies):
+        self.replies = list(replies)
+
+    def healthy(self, host):
+        return True
+
+    def chat(self, host, model, messages, num_ctx):
+        return self.replies.pop(0)
+
+
+def test_reply_hides_the_talk_marker(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], tmp_path)
+    spoken = reply_once(settings, memory, tools, _Talk(["TALK\nHello there.", "NONE"]), [], "hi")
+    assert spoken == "Hello there."
 
 
 def test_route_keeps_coding_on_the_teacher():

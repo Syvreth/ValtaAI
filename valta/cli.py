@@ -27,7 +27,7 @@ from valta.train import (
 )
 from valta.vectors import Vectors
 
-app = typer.Typer(help="Valta, a companion that grows.", no_args_is_help=True)
+app = typer.Typer(help="Valta, a companion that grows.", invoke_without_command=True)
 models_app = typer.Typer(help="Ollama models.")
 app.add_typer(models_app, name="models")
 
@@ -51,9 +51,17 @@ def _stack(project: Path | None = None):
     return settings, memory, tools, client
 
 
+@app.callback()
+def start(ctx: typer.Context):
+    """Talk to Valta. With no command, this opens the chat."""
+    if ctx.invoked_subcommand is None:
+        settings, memory, tools, client = _stack()
+        chat_loop(settings, memory, tools, client)
+
+
 @app.command()
 def chat():
-    """Talk to Valta. Research and coding use the 7B. Personal talk uses the fine-tune once it exists."""
+    """Open the chat. Valta reads files you mention, researches, and can change code from the conversation."""
     settings, memory, tools, client = _stack()
     chat_loop(settings, memory, tools, client)
 

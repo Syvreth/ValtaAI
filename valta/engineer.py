@@ -59,7 +59,7 @@ def parse_action(text: str) -> Action | None:
     body = text[start + len(marker) :]
     name, _, rest = body.partition("\n")
     name = name.strip().lower()
-    if name not in {"read_file", "list_directory", "search_memory", "write_file", "run_tests", "done"}:
+    if name not in {"read_file", "list_directory", "search_memory", "write_file", "run_tests", "done", "ingest", "research", "work"}:
         return None
     if name == "done":
         return Action(name="done", summary=_section(rest, "SUMMARY"))
@@ -69,6 +69,12 @@ def parse_action(text: str) -> Action | None:
         return Action(name=name, command=_section(rest, "CMD") or "python -m pytest -q")
     if name == "search_memory":
         return Action(name=name, query=_section(rest, "QUERY"))
+    if name == "ingest":
+        return Action(name=name, path=_section(rest, "PATH"))
+    if name == "research":
+        return Action(name=name, query=_section(rest, "QUERY"))
+    if name == "work":
+        return Action(name=name, query=_section(rest, "GOAL"))
     return Action(name=name, path=_section(rest, "PATH") or ".")
 
 

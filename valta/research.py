@@ -75,11 +75,20 @@ def summarize(client: OllamaClient, settings: Settings, topic: str, page: str, u
     )
 
 
-def research_once(settings: Settings, memory: Memory, tools: ToolRunner, client: OllamaClient) -> int:
+def research_once(
+    settings: Settings,
+    memory: Memory,
+    tools: ToolRunner,
+    client: OllamaClient,
+    topic: str | None = None,
+) -> int:
     if not client.healthy(settings.heavy_host):
         print("[research] The RX 6600 Ollama server is not up. Run scripts/start-ollama.ps1.")
         return 0
-    topic, topic_id = choose_topic(memory, settings)
+    if topic is None:
+        topic, topic_id = choose_topic(memory, settings)
+    else:
+        topic_id = None
     print(f"[research] {topic}")
     try:
         hits = search_web(topic, settings.research_page_cap)
@@ -108,7 +117,16 @@ def research_once(settings: Settings, memory: Memory, tools: ToolRunner, client:
     return filed
 
 
-def research_loop(settings: Settings, memory: Memory, tools: ToolRunner, client: OllamaClient, stop) -> None:
+def research_loop(
+    settings: Settings,
+    memory: Memory,
+    tools: ToolRunner,
+    client: OllamaClient,
+    stop,
+    delay_first: bool = False,
+) -> None:
+    if delay_first and stop.wait(settings.research_interval_sec):
+        return
     while not stop.is_set():
         try:
             research_once(settings, memory, tools, client)
