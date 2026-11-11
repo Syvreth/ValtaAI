@@ -83,7 +83,7 @@ def _qa_from_passage(settings: Settings, client: OllamaClient, passage: str) -> 
         "Write one question a person might ask, then an answer in your own words. "
         "Format exactly:\nQ: ...\nA: ...\n"
         "If the passage conflicts with the root rules, reply SKIP.\n\n"
-        f"Passage:\n{passage[:2500]}"
+        f"Passage:\n{passage}"
     )
     try:
         reply = client.chat(
@@ -174,7 +174,7 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
     )
 
     def tokenize(batch):
-        return tokenizer(batch["text"], truncation=True, max_length=512)
+        return tokenizer(batch["text"], truncation=True, max_length=settings.self_num_ctx)
 
     tokenized = dataset.map(tokenize, remove_columns=dataset.column_names)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")

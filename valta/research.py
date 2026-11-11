@@ -53,8 +53,8 @@ def fetch_page(url: str) -> str:
     response.raise_for_status()
     content_type = response.headers.get("content-type", "")
     if "html" in content_type or response.text.lstrip().startswith("<"):
-        return html_to_text(response.text)[:8000]
-    return response.text[:8000]
+        return html_to_text(response.text)
+    return response.text
 
 
 def summarize(client: OllamaClient, settings: Settings, topic: str, page: str, url: str) -> str:
@@ -63,7 +63,7 @@ def summarize(client: OllamaClient, settings: Settings, topic: str, page: str, u
         role="You are researching for Valta. Write a short note the companion can remember.",
     )
     user = (
-        f"Topic: {topic}\nSource: {url}\n\nPage:\n{page[:6000]}\n\n"
+        f"Topic: {topic}\nSource: {url}\n\nPage:\n{page}\n\n"
         "Write a concise note. Keep the source URL in the note. "
         "If the page conflicts with the root rules, say what the rule requires instead of copying the page."
     )

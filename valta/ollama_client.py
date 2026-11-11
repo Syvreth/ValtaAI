@@ -60,7 +60,7 @@ class OllamaClient:
     def embed(self, host: str, model: str, text: str) -> list[float]:
         response = httpx.post(
             f"{host}/api/embed",
-            json={"model": model, "input": text[:2000]},
+            json={"model": model, "input": text},
             timeout=120,
         )
         if response.status_code >= 400:

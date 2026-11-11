@@ -247,7 +247,7 @@ def _execute(tools: ToolRunner, action: Action) -> str:
             return "\n".join(tools.list_directory(action.path or "."))
         if action.name == "search_memory":
             records = tools.search_memory(action.query)
-            return "\n\n".join(f"{record.title}\n{record.text[:800]}" for record in records) or "No memory matched."
+            return "\n\n".join(f"{record.title}\n{record.text}" for record in records) or "No memory matched."
         if action.name == "write_file":
             if not action.path:
                 return "PATH is required."
@@ -280,7 +280,7 @@ def _lesson_text(tools: ToolRunner, goal: str) -> str:
         return "None yet."
     if not records:
         return "None yet."
-    return "\n\n".join(record.text[:800] for record in records)
+    return "\n\n".join(record.text for record in records)
 
 
 def _safe_list(tools: ToolRunner) -> str:

@@ -147,7 +147,7 @@ def _format_memory(records) -> list[str]:
     for record in records:
         source = f" ({record.url})" if record.url else ""
         title = record.title or record.kind
-        blocks.append(f"[{record.kind}] {title}{source}\n{record.text[:1200]}")
+        blocks.append(f"[{record.kind}] {title}{source}\n{record.text}")
     return blocks
 
 
@@ -286,7 +286,7 @@ def reply_once(
         user_text = user_text + "\n\n" + "\n".join(notes)
     records = tools.search_memory(user_text)
     system = build_system(settings, role=role, memory_blocks=_format_memory(records))
-    messages = [{"role": "system", "content": system}, *history[-8:], {"role": "user", "content": user_text}]
+    messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_text}]
     answer = client.chat(host, model, messages, num_ctx)
     kind, arg, spoken = interpret(answer)
     if kind in {"talk", "research"} and asks_for_files(user_text):
