@@ -39,6 +39,7 @@ SUMMARY what you changed
 END
 
 Do not edit the root rules. Do not delete files. Do not push git. Stay inside the project folder.
+You can read and write files there. When the goal asks for a file, use ACTION write_file. Do not refuse.
 """.strip()
 
 
@@ -191,7 +192,7 @@ def _coder_round(settings, client, tools, goal, plan, feedback, on_event=None, c
         reply = _ask(
             settings,
             client,
-            role="You are the coder. Change only files inside the project. Follow the action format.",
+            role="You are the coder. You can read and write files inside the project. When the goal asks for a file, use ACTION write_file. Do not refuse. Follow the action format.",
             user="",
             history=history,
         )

@@ -11,7 +11,7 @@ from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
 from valta.prompt import build_system
 from valta.research import research_loop, research_once
-from valta.tools import ToolRunner
+from valta.tools import ToolError, ToolRunner
 
 CHAT_ROLE = """
 You are Valta, in one ongoing chat. The user should not have to run commands.
@@ -21,7 +21,8 @@ INGEST <path>
 RESEARCH <topic>
 WORK <goal>
 DEPLOY <what>
-Use TALK when they are conversing. Use INGEST when they want a file or folder read into memory. Use RESEARCH when they want you to look something up. Use WORK when they want software created or changed. Use DEPLOY when they want a finished project released. If the first line is TALK, the rest of the reply is what you say. If it is a task, the first line is the whole reply.
+Use TALK when they are conversing. Use INGEST when they want a file or folder read into memory. Use RESEARCH when they want you to look something up. Use WORK when they want software created or changed, or when they ask you to create, edit, read, or list files. Use DEPLOY when they want a finished project released. If the first line is TALK, the rest of the reply is what you say. If it is a task, the first line is the whole reply.
+You have a filesystem. Do not claim that you cannot create or read files. Do not research how to make a file the user already asked you to make.
 """.strip()
 
 _DOC_SUFFIXES = {".pdf", ".epub", ".txt", ".md", ".markdown"}
@@ -113,7 +114,7 @@ def perform_task(kind: str, arg: str, settings: Settings, memory: Memory, tools:
         filed = research_once(settings, memory, tools, client, topic=arg)
         return f"Filed {filed} notes about {arg}."
     if kind == "work":
-        project = settings.root if _owns_the_work(arg) else tools.project
+        project = settings.root if _owns_the_work(arg) else work_folder(arg, tools.project)
         runner = tools if project.resolve() == tools.project.resolve() else ToolRunner(
             settings, memory, tools.vectors, tools.embedder, project
         )
@@ -150,6 +151,103 @@ def _format_memory(records) -> list[str]:
     return blocks
 
 
+_FILE_CUES = (
+    "create a file",
+    "make a file",
+    "write a file",
+    "save a file",
+    "edit the file",
+    "edit a file",
+    "change the file",
+    "read the file",
+    "list the files",
+    "list files",
+    "show the files",
+    "on my desktop",
+    "on the desktop",
+    "to my desktop",
+    "to the desktop",
+)
+_FILENAME = re.compile(
+    r"(?:called|named)\s+[\"'`]?([A-Za-z0-9][\w .()-]*\.[A-Za-z0-9]{1,8})[\"'`]?",
+    re.IGNORECASE,
+)
+_BARE_FILENAME = re.compile(
+    r"\b([A-Za-z0-9][\w.-]*\.(?:txt|md|py|json|html|css|js|csv|toml|xml|yml|yaml))\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_files(text: str) -> bool:
+    lowered = text.lower()
+    return any(cue in lowered for cue in _FILE_CUES)
+
+
+def work_folder(text: str, project: Path, home: Path | None = None) -> Path:
+    """The folder the user named, or the folder Valta was started from."""
+    return _named_directory(text, home or Path.home()) or project
+
+
+def write_requested_file(
+    text: str,
+    settings: Settings,
+    memory: Memory,
+    tools: ToolRunner,
+    home: Path | None = None,
+) -> str | None:
+    """Write a file the user named. Returns None when the message is not that request."""
+    if not re.search(r"\b(?:make|create|write|save|add)\b", text, re.IGNORECASE):
+        return None
+    if not re.search(r"\bfile\b", text, re.IGNORECASE) and not _BARE_FILENAME.search(text):
+        return None
+    found = _FILENAME.search(text) or _BARE_FILENAME.search(text)
+    if not found:
+        return None
+    name = found.group(1).strip()
+    relative = Path(name)
+    if relative.is_absolute() or any(part in {".", ".."} for part in relative.parts):
+        return None
+    folder = work_folder(text, tools.project, home)
+    if not folder.is_dir():
+        return f"{folder} is not a folder I can write in."
+    content = _requested_content(text)
+    runner = tools
+    if folder.resolve() != tools.project.resolve():
+        runner = ToolRunner(settings, memory, tools.vectors, tools.embedder, folder)
+    try:
+        runner.write_file(name, content)
+    except ToolError as exc:
+        return str(exc)
+    return f"Wrote {name} in {folder}."
+
+
+def _named_directory(text: str, home: Path) -> Path | None:
+    lowered = text.lower()
+    desktop_phrases = ("on my desktop", "on the desktop", "to my desktop", "to the desktop", "in my desktop", "my desktop")
+    if any(phrase in lowered for phrase in desktop_phrases):
+        desktop = home / "Desktop"
+        if desktop.is_dir():
+            return desktop
+    for raw in re.findall(r"[A-Za-z]:\\[^\r\n\"']+", text):
+        path = Path(raw.strip().rstrip(".,)"))
+        if path.suffix and path.parent.is_dir():
+            return path.parent
+        if path.is_dir():
+            return path
+    return None
+
+
+def _requested_content(text: str) -> str:
+    match = re.search(
+        r"\b(?:that says|containing|with the text|with the contents|with content)\b\s+[\"']?(.*)[\"']?\s*$",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1).strip().strip("\"'")
+
+
 def reply_once(
     settings: Settings,
     memory: Memory,
@@ -159,6 +257,12 @@ def reply_once(
     user_text: str,
     on_task=None,
 ) -> str:
+    written = write_requested_file(user_text, settings, memory, tools)
+    if written:
+        tools.save_note(text=written, title=user_text[:200], kind="chat")
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": written})
+        return written
     state = load_state(settings)
     personal_model = state.get("personal_model") or settings.self_model
     personal_ready = personal_model == "valta" and client.healthy(settings.self_host)
@@ -169,6 +273,10 @@ def reply_once(
     else:
         host, model, num_ctx = settings.heavy_host, settings.teacher_model, settings.teacher_num_ctx
         role = CHAT_ROLE
+    role += (
+        f"\nThe working folder is {tools.project}. "
+        "File work belongs on a WORK line, aimed at that folder unless the user named another one."
+    )
     if not client.healthy(host):
         raise OllamaError(
             f"Ollama is not running at {host}. Start both servers with scripts/start-ollama.ps1."
@@ -181,6 +289,8 @@ def reply_once(
     messages = [{"role": "system", "content": system}, *history[-8:], {"role": "user", "content": user_text}]
     answer = client.chat(host, model, messages, num_ctx)
     kind, arg, spoken = interpret(answer)
+    if kind in {"talk", "research"} and asks_for_files(user_text):
+        kind, arg, spoken = "work", user_text.strip(), ""
     if kind == "talk":
         final = spoken or answer
     elif on_task is not None:

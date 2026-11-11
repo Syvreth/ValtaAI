@@ -6,7 +6,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
-from valta.chat import reply_once
+from valta.chat import reply_once, work_folder
 from valta.jobs import JobManager
 from valta.research import research_loop
 
@@ -181,7 +181,7 @@ class ValtaApp(App):
 
     def _respond(self, text: str) -> None:
         def on_task(kind: str, arg: str) -> None:
-            project = self.settings.root if kind == "work" and _self(arg) else None
+            project = self.settings.root if kind == "work" and _self(arg) else work_folder(arg, self.tools.project)
             if kind == "ingest":
                 from pathlib import Path
 

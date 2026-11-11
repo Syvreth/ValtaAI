@@ -10,7 +10,7 @@ from valta.prompt import build_system
 from valta.tools import ToolError, ToolRunner
 from valta.train import build_pairs, conflicts_with_rules
 from valta.vectors import Vectors
-from valta.chat import find_docs, interpret, read_mentioned_files, reply_once, route_message
+from valta.chat import find_docs, interpret, read_mentioned_files, reply_once, route_message, write_requested_file
 from valta.engineer import parse_action, run_goal
 
 
@@ -117,6 +117,52 @@ def test_job_diff_and_deny_restores(tmp_path: Path):
     restore(target, before)
     assert (target / "calc.py").read_text(encoding="utf-8") == "a = 1\n"
     assert not (target / "new.py").exists()
+
+
+def test_named_file_is_written_where_asked(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    project = tmp_path / "proj"
+    project.mkdir()
+    desktop = tmp_path / "home" / "Desktop"
+    desktop.mkdir(parents=True)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], project)
+    written = write_requested_file(
+        "Make a file on my desktop called hello.txt",
+        settings,
+        memory,
+        tools,
+        home=tmp_path / "home",
+    )
+    assert written == f"Wrote hello.txt in {desktop}."
+    assert (desktop / "hello.txt").is_file()
+    note = write_requested_file(
+        "Create a file called note.txt that says hello",
+        settings,
+        memory,
+        tools,
+        home=tmp_path / "home",
+    )
+    assert (project / "note.txt").read_text(encoding="utf-8") == "hello"
+    assert "note.txt" in note
+    assert write_requested_file("Build me a calculator.", settings, memory, tools) is None
+
+
+def test_file_request_is_not_left_as_talk(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], tmp_path)
+    seen = []
+    reply_once(
+        settings,
+        memory,
+        tools,
+        _Talk(["TALK\nI can't use the filesystem.", "NONE"]),
+        [],
+        "list the files",
+        on_task=lambda kind, arg: seen.append((kind, arg)),
+    )
+    assert seen == [("work", "list the files")]
 
 
 def test_reply_hides_the_talk_marker(tmp_path: Path):
