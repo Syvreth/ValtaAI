@@ -1,0 +1,4 @@
+# One research topic per line. Lines starting with # are ignored.
+local software
+python
+building software projects

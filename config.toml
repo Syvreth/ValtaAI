@@ -1,0 +1,20 @@
+heavy_host = "http://127.0.0.1:11434"
+self_host = "http://127.0.0.1:11435"
+
+teacher_model = "hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
+self_model = "qwen2.5-coder:3b"
+embed_model = "nomic-embed-text"
+hf_base = "Qwen/Qwen2.5-Coder-3B-Instruct"
+
+teacher_num_ctx = 8192
+self_num_ctx = 4096
+
+research_interval_sec = 300
+research_page_cap = 3
+train_threshold = 8
+
+chunk_chars = 3200
+chunk_overlap = 400
+top_k = 5
+
+extra_models = []
