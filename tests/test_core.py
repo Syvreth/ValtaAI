@@ -79,6 +79,7 @@ def test_training_skips_rule_conflicts_and_raw_books_are_not_the_answer(tmp_path
 def test_chat_understands_a_task_line_and_a_file_path(tmp_path: Path):
     assert interpret("TALK\nHello there.") == ("talk", "", "Hello there.")
     assert interpret("RESEARCH local compilers")[0] == "research"
+    assert interpret("DEPLOY the calculator")[0] == "deploy"
     note = tmp_path / "manual.md"
     note.write_text("# Tools\n\nA wrench turns bolts.\n", encoding="utf-8")
     found = find_docs(f'please read "{note}"')
@@ -99,6 +100,23 @@ class _Talk:
 
     def chat(self, host, model, messages, num_ctx):
         return self.replies.pop(0)
+
+
+def test_job_diff_and_deny_restores(tmp_path: Path):
+    from valta.jobs import diff_since, restore, snapshot
+
+    target = tmp_path / "proj"
+    target.mkdir()
+    (target / "calc.py").write_text("a = 1\n", encoding="utf-8")
+    before = snapshot(target)
+    (target / "calc.py").write_text("a = 2\n", encoding="utf-8")
+    (target / "new.py").write_text("print(1)\n", encoding="utf-8")
+    diff, changed = diff_since(target, before)
+    assert "calc.py" in changed and "new.py" in changed
+    assert "a = 2" in diff
+    restore(target, before)
+    assert (target / "calc.py").read_text(encoding="utf-8") == "a = 1\n"
+    assert not (target / "new.py").exists()
 
 
 def test_reply_hides_the_talk_marker(tmp_path: Path):
@@ -193,6 +211,41 @@ def test_work_loop_edits_tests_and_remembers(tmp_path: Path):
     assert (tmp_path / "hello.py").read_text(encoding="utf-8") == "print('hi')"
     assert memory.recent(kind="lesson")
     assert memory.conn.execute("SELECT COUNT(*) AS n FROM agents").fetchone()["n"] == 4
+
+
+def test_control_center_composes(tmp_path: Path):
+    import asyncio
+
+    from textual.widgets import TabbedContent
+
+    from valta.ui import ValtaApp
+
+    class _Pilot:
+        def healthy(self, host):
+            return True
+
+        def ps(self, host):
+            return []
+
+        def chat(self, host, model, messages, num_ctx):
+            return "TALK\nReady."
+
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.1, 0.2, 0.3], tmp_path)
+    app = ValtaApp(settings, memory, tools, _Pilot(), start_research=False)
+
+    async def run():
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#chat-log").lines
+            assert app.query_one("#live-log").lines
+            await pilot.press("f6")
+            await pilot.pause()
+            assert app.query_one("#approvals-log").lines
+            assert app.query_one(TabbedContent).active == "approvals"
+
+    asyncio.run(run())
 
 
 def test_default_agent_and_project(tmp_path: Path):

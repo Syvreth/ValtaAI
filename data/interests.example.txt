@@ -1,0 +1,5 @@
+# One research topic per line. Lines starting with # are ignored.
+# Copy this file to data/interests.txt. That copy stays on your machine.
+local software
+python
+building software projects

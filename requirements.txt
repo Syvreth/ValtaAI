@@ -4,4 +4,5 @@ chromadb>=0.5
 pypdf>=5
 ebooklib>=0.18
 ddgs>=9
+textual>=1.0
 pytest>=8

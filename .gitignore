@@ -1,16 +1,70 @@
+# Python
 .venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.egg-info/
 dist/
 build/
+htmlcov/
+.coverage
 
+# OS and editor junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+*.swp
+
+# Secrets. Config hosts are local; do not commit keys or tokens.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+credentials.json
+secrets.json
+secret.json
+*.secret
+id_rsa
+id_ed25519
+
+# Private constitution. The public starter is rules/root.example.md.
+rules/root.md
+
+# Personal research list. The public starter is data/interests.example.txt.
+data/interests.txt
+
+# Everything Valta has learned or trained. This is the large, private half.
 data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.sqlite
+data/*.sqlite3
 data/chroma/
 data/adapters/
 data/merged/
 data/models/
 data/datasets/
+data/releases/
 data/state.json
+data/library/*
+!data/library/.gitkeep
+
+# Books dropped into the tree, and model weights.
+*.epub
+*.mobi
+*.azw
+*.azw3
+*.pdf
 *.gguf
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.bin
+*.log

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import typer
 
-from valta.chat import chat_loop, live
 from valta.config import load_settings
 from valta.engineer import run_goal
 from valta.ingest import ingest_path
@@ -32,6 +31,13 @@ models_app = typer.Typer(help="Ollama models.")
 app.add_typer(models_app, name="models")
 
 
+def _open_ui() -> None:
+    settings, memory, tools, client = _stack()
+    from valta.ui import ValtaApp
+
+    ValtaApp(settings, memory, tools, client).run()
+
+
 def _stack(project: Path | None = None):
     settings = load_settings()
     memory = Memory(settings)
@@ -53,24 +59,21 @@ def _stack(project: Path | None = None):
 
 @app.callback()
 def start(ctx: typer.Context):
-    """Talk to Valta. With no command, this opens the chat."""
+    """Open the Valta control center."""
     if ctx.invoked_subcommand is None:
-        settings, memory, tools, client = _stack()
-        chat_loop(settings, memory, tools, client)
+        _open_ui()
 
 
 @app.command()
 def chat():
-    """Open the chat. Valta reads files you mention, researches, and can change code from the conversation."""
-    settings, memory, tools, client = _stack()
-    chat_loop(settings, memory, tools, client)
+    """Open the control center. Chat, watch the crew, and approve sensitive work."""
+    _open_ui()
 
 
 @app.command("live")
 def live_cmd():
-    """Chat, and research in the background."""
-    settings, memory, tools, client = _stack()
-    live(settings, memory, tools, client)
+    """Open the control center. Research continues in the background."""
+    _open_ui()
 
 
 @app.command()

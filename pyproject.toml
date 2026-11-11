@@ -10,6 +10,7 @@ dependencies = [
   "pypdf>=5",
   "ebooklib>=0.18",
   "ddgs>=9",
+  "textual>=1.0",
 ]
 
 [project.optional-dependencies]

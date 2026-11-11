@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from valta.config import Settings
+from valta.control import JobStopped
 from valta.memory import Memory
 from valta.ollama_client import OllamaError
 from valta.prompt import build_system
@@ -100,6 +101,18 @@ def _section(text: str, label: str) -> str:
     return "\n".join(found).strip()
 
 
+def _emit(on_event, agent: str, text: str) -> None:
+    if on_event is not None:
+        on_event(agent, text)
+        return
+    print(f"[{agent}]\n{text}\n")
+
+
+def _checkpoint(control) -> None:
+    if control is not None:
+        control.checkpoint()
+
+
 def run_goal(
     settings: Settings,
     memory: Memory,
@@ -107,6 +120,8 @@ def run_goal(
     client,
     goal: str,
     test_cmd: str = "python -m pytest -q",
+    on_event=None,
+    control=None,
 ) -> bool:
     """Plan, edit, test, and repair. Root rules stay in force for every agent."""
     if not client.healthy(settings.heavy_host):
@@ -116,51 +131,63 @@ def run_goal(
     memory.add_goal(goal)
     lessons = _lesson_text(tools, goal)
     listing = _safe_list(tools)
+    _checkpoint(control)
     plan = _ask(
         settings,
         client,
         role="You are the planner. Write a short plan. Do not edit files.",
         user=f"Goal:\n{goal}\n\nProject files:\n{listing}\n\nLessons:\n{lessons}",
     )
-    print(f"[planner]\n{plan}\n")
+    _emit(on_event, "planner", plan)
     feedback = "Carry out the plan. Use one ACTION at a time."
     summary = ""
     test_output = ""
     passed = False
-    for round_index in range(settings.repair_rounds + 1):
-        summary = _coder_round(settings, client, tools, goal, plan, feedback)
-        test_output = _run_checks(tools, test_cmd)
-        print(f"[tester]\n{test_output}\n")
-        if _tests_passed(test_output):
-            verdict = _ask(
-                settings,
-                client,
-                role="You are the reviewer. Reply PASS or FAIL, then one sentence.",
-                user=f"Goal:\n{goal}\n\nPlan:\n{plan}\n\nCoder summary:\n{summary}\n\nTests:\n{test_output}",
-            )
-            print(f"[reviewer]\n{verdict}\n")
-            passed = verdict.strip().upper().startswith("PASS")
-            if passed:
+    stopped = False
+    try:
+        for round_index in range(settings.repair_rounds + 1):
+            _checkpoint(control)
+            if round_index:
+                _emit(on_event, "repair", f"Attempt {round_index + 1}. {feedback}")
+            summary = _coder_round(settings, client, tools, goal, plan, feedback, on_event, control)
+            _checkpoint(control)
+            test_output = _run_checks(tools, test_cmd)
+            _emit(on_event, "tester", test_output)
+            if _tests_passed(test_output):
+                verdict = _ask(
+                    settings,
+                    client,
+                    role="You are the reviewer. Reply PASS or FAIL, then one sentence.",
+                    user=f"Goal:\n{goal}\n\nPlan:\n{plan}\n\nCoder summary:\n{summary}\n\nTests:\n{test_output}",
+                )
+                _emit(on_event, "reviewer", verdict)
+                passed = verdict.strip().upper().startswith("PASS")
+                if passed:
+                    break
+                feedback = f"The reviewer said the goal is not met.\n{verdict}"
+            else:
+                feedback = f"The tests failed. Repair the code.\n{test_output}"
+            if round_index == settings.repair_rounds:
                 break
-            feedback = f"The reviewer said the goal is not met.\n{verdict}"
-        else:
-            feedback = f"The tests failed. Repair the code.\n{test_output}"
-        if round_index == settings.repair_rounds:
-            break
-    status = "passed" if passed else "failed"
+    except JobStopped:
+        stopped = True
+        _emit(on_event, "valta", "Stopped.")
+    status = "stopped" if stopped else "passed" if passed else "failed"
     tools.save_note(
         text=f"Goal: {goal}\nStatus: {status}\nSummary: {summary}\n\n{test_output}",
         title=goal[:200],
         kind="lesson",
     )
-    print(f"[valta] {status}. The lesson is in memory.")
+    if not stopped:
+        _emit(on_event, "valta", f"{status}. The lesson is in memory.")
     return passed
 
 
-def _coder_round(settings: Settings, client, tools: ToolRunner, goal: str, plan: str, feedback: str) -> str:
+def _coder_round(settings, client, tools, goal, plan, feedback, on_event=None, control=None) -> str:
     history = [{"role": "user", "content": f"Goal:\n{goal}\n\nPlan:\n{plan}\n\n{feedback}\n\n{ACTION_HELP}"}]
     summary = ""
     for _step in range(settings.work_max_steps):
+        _checkpoint(control)
         reply = _ask(
             settings,
             client,
@@ -173,11 +200,12 @@ def _coder_round(settings: Settings, client, tools: ToolRunner, goal: str, plan:
             result = "That was not an action. " + ACTION_HELP
         elif action.name == "done":
             summary = action.summary or "Finished the edit pass."
-            print(f"[coder] {summary}")
+            _emit(on_event, "coder", summary)
             return summary
         else:
             result = _execute(tools, action)
-            print(f"[coder] {action.name} {action.path or action.command or action.query}")
+            detail = action.path or action.command or action.query or action.name
+            _emit(on_event, "coder", f"{action.name} {detail}\n{result}")
         history.append({"role": "assistant", "content": reply})
         history.append({"role": "user", "content": str(result)})
         history = history[-8:]

@@ -20,7 +20,8 @@ TALK
 INGEST <path>
 RESEARCH <topic>
 WORK <goal>
-Use TALK when they are conversing. Use INGEST when they want a file or folder read into memory. Use RESEARCH when they want you to look something up. Use WORK when they want software created or changed. If the first line is TALK, the rest of the reply is what you say. If it is a task, the first line is the whole reply.
+DEPLOY <what>
+Use TALK when they are conversing. Use INGEST when they want a file or folder read into memory. Use RESEARCH when they want you to look something up. Use WORK when they want software created or changed. Use DEPLOY when they want a finished project released. If the first line is TALK, the rest of the reply is what you say. If it is a task, the first line is the whole reply.
 """.strip()
 
 _DOC_SUFFIXES = {".pdf", ".epub", ".txt", ".md", ".markdown"}
@@ -82,7 +83,7 @@ def interpret(answer: str) -> tuple[str, str, str]:
     upper = line.upper()
     if upper == "TALK":
         return "talk", "", rest.strip()
-    for kind in ("INGEST ", "RESEARCH ", "WORK "):
+    for kind in ("INGEST ", "RESEARCH ", "WORK ", "DEPLOY "):
         if upper.startswith(kind):
             return kind.strip().lower(), line.split(" ", 1)[1].strip().strip('"'), ""
     action = parse_action(cleaned)
@@ -120,6 +121,9 @@ def perform_task(kind: str, arg: str, settings: Settings, memory: Memory, tools:
         if passed:
             return f"Finished: {arg}"
         return f"Could not finish cleanly: {arg}"
+    if kind == "deploy":
+        memory.add_record(text=f"Deploy requested: {arg}", kind="fact", title="deploy requested")
+        return f"{arg} is waiting for approval in the control center."
     return ""
 
 
@@ -146,7 +150,15 @@ def _format_memory(records) -> list[str]:
     return blocks
 
 
-def reply_once(settings: Settings, memory: Memory, tools: ToolRunner, client: OllamaClient, history: list, user_text: str) -> str:
+def reply_once(
+    settings: Settings,
+    memory: Memory,
+    tools: ToolRunner,
+    client: OllamaClient,
+    history: list,
+    user_text: str,
+    on_task=None,
+) -> str:
     state = load_state(settings)
     personal_model = state.get("personal_model") or settings.self_model
     personal_ready = personal_model == "valta" and client.healthy(settings.self_host)
@@ -171,6 +183,14 @@ def reply_once(settings: Settings, memory: Memory, tools: ToolRunner, client: Ol
     kind, arg, spoken = interpret(answer)
     if kind == "talk":
         final = spoken or answer
+    elif on_task is not None:
+        on_task(kind, arg)
+        final = {
+            "work": f"Queued that with the crew: {arg}",
+            "research": f"Researching {arg}. Watch the Live tab.",
+            "ingest": f"Reading {arg}.",
+            "deploy": f"{arg} is waiting for approval.",
+        }.get(kind, arg)
     else:
         try:
             result = perform_task(kind, arg, settings, memory, tools, client)
