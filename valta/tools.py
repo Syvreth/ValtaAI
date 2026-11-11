@@ -169,7 +169,21 @@ class ToolRunner:
             raise ToolError("That command needs approval. Allowed: python -m pytest, python -m compileall.")
         return [sys.executable, *tokens[1:]]
 
+    def _refuse_symlink(self, path: Path) -> None:
+        candidate = path if path.is_absolute() else (self.project / path)
+        cursor = candidate
+        while True:
+            if cursor.is_symlink():
+                raise ToolError("That path is a symbolic link. Valta will not follow it.")
+            if cursor == self.project or self.project not in cursor.parents:
+                break
+            parent = cursor.parent
+            if parent == cursor:
+                break
+            cursor = parent
+
     def _inside_project(self, path: Path) -> Path:
+        self._refuse_symlink(path)
         resolved = path.resolve() if path.is_absolute() else (self.project / path).resolve()
         if resolved != self.project and self.project not in resolved.parents:
             raise ToolError("That path is outside the project folder.")

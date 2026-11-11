@@ -180,6 +180,31 @@ def test_route_keeps_coding_on_the_teacher():
     assert route_message("hello", personal_ready=True) == "teacher"
 
 
+def test_symlink_paths_are_refused(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    project = tmp_path / "work"
+    project.mkdir()
+    (project / "real.txt").write_text("ok", encoding="utf-8")
+    (project / "link.txt").write_text("no", encoding="utf-8")
+    (project / "linked-dir").mkdir()
+    tools = ToolRunner(settings, Memory(settings), Vectors(settings), lambda text: [0.1, 0.2], project)
+    real_is_symlink = Path.is_symlink
+
+    def fake_is_symlink(self: Path) -> bool:
+        if self.name in {"link.txt", "linked-dir"}:
+            return True
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+    with pytest.raises(ToolError):
+        tools.read_file("link.txt")
+    with pytest.raises(ToolError):
+        tools.write_file("link.txt", "changed")
+    with pytest.raises(ToolError):
+        tools.read_file("linked-dir/note.txt")
+    assert tools.read_file("real.txt") == "ok"
+
+
 def test_file_reads_stay_in_the_project(tmp_path: Path):
     settings = _settings(tmp_path)
     project = tmp_path / "work"
@@ -257,6 +282,21 @@ def test_work_loop_edits_tests_and_remembers(tmp_path: Path):
     assert (tmp_path / "hello.py").read_text(encoding="utf-8") == "print('hi')"
     assert memory.recent(kind="lesson")
     assert memory.conn.execute("SELECT COUNT(*) AS n FROM agents").fetchone()["n"] == 4
+
+
+def test_a_pass_requires_a_written_file(tmp_path: Path):
+    settings = _settings(tmp_path)
+    settings.work_max_steps = 1
+    settings.repair_rounds = 0
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.1, 0.2, 0.3], tmp_path)
+    client = _Scripted(
+        [
+            "Say it is done.",
+            "ACTION done\nSUMMARY Nothing changed\nEND",
+        ]
+    )
+    assert run_goal(settings, memory, tools, client, "add a status file") is False
 
 
 def test_control_center_composes(tmp_path: Path):

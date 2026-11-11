@@ -25,9 +25,9 @@ QUERY what you want to recall
 END
 
 ACTION write_file
-PATH relative/path
+PATH the/real/file.py
 CONTENT
-file contents
+the full file text
 END
 
 ACTION run_tests
@@ -40,6 +40,7 @@ END
 
 Do not edit the root rules. Do not delete files. Do not push git. Stay inside the project folder.
 You can read and write files there. When the goal asks for a file, use ACTION write_file. Do not refuse.
+Never copy the sample PATH relative/path or the sample QUERY. Use a real project path.
 """.strip()
 
 
@@ -150,11 +151,14 @@ def run_goal(
             _checkpoint(control)
             if round_index:
                 _emit(on_event, "repair", f"Attempt {round_index + 1}. {feedback}")
-            summary = _coder_round(settings, client, tools, goal, plan, feedback, on_event, control)
+            summary, wrote = _coder_round(settings, client, tools, goal, plan, feedback, on_event, control)
             _checkpoint(control)
             test_output = _run_checks(tools, test_cmd)
             _emit(on_event, "tester", test_output)
-            if _tests_passed(test_output):
+            if not wrote:
+                passed = False
+                feedback = "No file was written. Use ACTION write_file with a real path and the full file text, then ACTION done."
+            elif _tests_passed(test_output):
                 verdict = _ask(
                     settings,
                     client,
@@ -184,15 +188,16 @@ def run_goal(
     return passed
 
 
-def _coder_round(settings, client, tools, goal, plan, feedback, on_event=None, control=None) -> str:
+def _coder_round(settings, client, tools, goal, plan, feedback, on_event=None, control=None) -> tuple[str, bool]:
     history = [{"role": "user", "content": f"Goal:\n{goal}\n\nPlan:\n{plan}\n\n{feedback}\n\n{ACTION_HELP}"}]
     summary = ""
+    wrote = False
     for _step in range(settings.work_max_steps):
         _checkpoint(control)
         reply = _ask(
             settings,
             client,
-            role="You are the coder. You can read and write files inside the project. When the goal asks for a file, use ACTION write_file. Do not refuse. Follow the action format.",
+            role="You are the coder. You can read and write files inside the project. When the goal asks for a file, use ACTION write_file. Do not refuse. Follow the action format. Never use the sample path relative/path.",
             user="",
             history=history,
         )
@@ -200,17 +205,38 @@ def _coder_round(settings, client, tools, goal, plan, feedback, on_event=None, c
         if action is None:
             result = "That was not an action. " + ACTION_HELP
         elif action.name == "done":
-            summary = action.summary or "Finished the edit pass."
-            _emit(on_event, "coder", summary)
-            return summary
+            if not wrote:
+                result = "No file was written. Use ACTION write_file with a real PATH and the full file text."
+                _emit(on_event, "coder", result)
+            else:
+                summary = action.summary or "Finished the edit pass."
+                _emit(on_event, "coder", summary)
+                return summary, True
         else:
-            result = _execute(tools, action)
+            rejected = _example_action(action)
+            if rejected:
+                result = rejected
+            else:
+                result = _execute(tools, action)
+                if action.name == "write_file" and str(result).startswith("Wrote "):
+                    wrote = True
             detail = action.path or action.command or action.query or action.name
             _emit(on_event, "coder", f"{action.name} {detail}\n{result}")
         history.append({"role": "assistant", "content": reply})
         history.append({"role": "user", "content": str(result)})
         history = history[-8:]
-    return summary or "Stopped at the step limit before ACTION done."
+    return summary or "Stopped at the step limit before ACTION done.", wrote
+
+
+def _example_action(action: Action) -> str | None:
+    path = action.path.replace("\\", "/")
+    if action.name in {"read_file", "write_file"} and path in {"relative/path", "the/real/file.py"}:
+        return "That PATH is the sample from the instructions. Use a real project file, such as valta/status.py."
+    if action.name == "search_memory" and action.query.strip() == "what you want to recall":
+        return "That QUERY is the sample from the instructions. Write the file, or search for a real topic."
+    if action.name == "write_file" and action.content.strip() in {"", "file contents", "the full file text"}:
+        return "That CONTENT is the sample from the instructions. Put the real file text after CONTENT."
+    return None
 
 
 def _execute(tools: ToolRunner, action: Action) -> str:

@@ -13,6 +13,7 @@ from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
 from valta.prompt import load_rules
 from valta.research import research_once
+from valta.status import project_status
 from valta.tools import ToolRunner
 from valta.train import (
     build_pairs,
@@ -155,6 +156,7 @@ def doctor():
     settings = load_settings()
     client = OllamaClient(settings)
     load_rules(settings)
+    typer.echo(project_status(settings))
     typer.echo(f"Root rules: {settings.rules_path}")
     for label, host in (("RX 6600", settings.heavy_host), ("GTX 1660", settings.self_host)):
         typer.echo(f"\n{label}  {host}")
