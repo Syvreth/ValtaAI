@@ -247,3 +247,9 @@ def test_user_tasks_load_from_json(tmp_path: Path):
     assert isinstance(mine, EvalTask)
     ok, _ = check_solution("def double(x):\n    return x * 2\n", mine.tests)
     assert ok
+
+
+def test_a_solution_cannot_read_the_keyboard():
+    task = next(t for t in BUILTIN_TASKS if t.id == "fizzbuzz")
+    ok, note = check_solution("def fizzbuzz(n):\n    return input()\n", task.tests, timeout=5)
+    assert not ok and "timed out" not in note

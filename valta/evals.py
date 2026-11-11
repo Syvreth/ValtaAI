@@ -27,6 +27,7 @@ from valta.prompt import build_system
 RUN_TIMEOUT_SEC = 10
 EVAL_MAX_CTX = 8192
 _SUFFIX = "Reply with one ```python code block that holds the complete function and any imports. No explanation."
+REPLY_SUFFIX = _SUFFIX  # the instruction every eval prompt ends with; practice problems use it too
 
 
 @dataclass
@@ -265,6 +266,7 @@ def check_solution(code: str, tests: str, timeout: int = RUN_TIMEOUT_SEC) -> tup
                 [sys.executable, "-E", "-s", "check.py"],
                 cwd=work,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 timeout=timeout,
                 env=env,

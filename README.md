@@ -151,6 +151,7 @@ Opening `valta` with no command is the control center. The commands below are th
 | `valta forget <id>` | Delete one record and its vector. |
 | `valta rules` | Print the root rules that are loaded. |
 | `valta eval` | Score a model on the coding eval. `--teacher` scores the 7B instead. |
+| `valta practice` | The teacher sets coding problems, tests check the answers, and what the 3B gets wrong is saved for training. `--count` sets how many to try, `--train` fine-tunes afterwards. |
 | `valta train` | Build pairs, QLoRA the 3B, score it, and replace `valta` only if it did not get worse. `--skip-eval` promotes without scoring. |
 
 From the chat itself, Valta can decide to ingest a path you mention, research a topic, or start a job. You do not have to switch commands.
@@ -169,6 +170,30 @@ Two kinds of example are saved as you work:
 - **Verified solutions.** When a job passes its tests and the reviewer says PASS, the goal and the files it wrote are saved. Jobs that change Valta's own code are skipped, since those wait for your approval and can be denied.
 
 Every fine-tune starts again from the base model, so each run trains on all examples ever saved, not only the new ones. Training uses the model's own chat template and learns only from the answer. The root rules at the top of each pair are masked out. Examples longer than `train_max_len` tokens are skipped instead of cut.
+
+## Practice
+
+`valta practice` is how it improves without you in the loop. For each problem:
+
+1. The teacher invents a small Python problem and tests for it.
+2. The tests have to fail against a function that does nothing, and the problem must not resemble an eval task.
+3. The teacher solves it again from the text alone. If its solution does not pass its own tests, the problem is thrown away. Two separate writings agreeing through a test is the check that the problem is sound.
+4. The personal model tries the same problem. If it already passes, nothing is learned and the problem is dropped.
+5. If it fails, the teacher's verified solution is saved as a training example.
+
+```powershell
+.\.venv\Scripts\valta.exe practice --count 30
+.\.venv\Scripts\valta.exe practice --count 30 --train
+```
+
+`--train` runs the normal fine-tune afterwards once enough examples are waiting, with the same eval gate. Run it overnight or from Task Scheduler and it keeps going without you. The teacher works on the RX 6600 and the check on the GTX 1660, so they do not fight over one card.
+
+What this can and cannot do:
+
+- The 3B can get as good as the 7B is at what tests can check. It cannot get better than the 7B, and the 7B does not improve by itself here.
+- Most problems get dropped. Expect a small share of each run to become examples, and expect hundreds before a fine-tune changes much.
+- The tests are written by the same model that solves the problems. The agreement check and the stub check remove most bad problems, not all of them.
+- Model-written code is run in a temporary folder with a timeout. Code that opens files, starts processes, uses the network or reads the keyboard is refused before it runs. That stops honest mistakes. It is not a sandbox against code written to get around it.
 
 ## Does it get better?
 
@@ -211,6 +236,8 @@ valta/
 │   ├── memory.py            SQLite
 │   ├── vectors.py           Chroma
 │   ├── research.py          background research
+│   ├── practice.py          self-set problems, verified by tests
+│   ├── evals.py             the coding eval and the promotion gate
 │   ├── ingest.py            PDF, EPUB, TXT, Markdown
 │   └── train.py             QLoRA and ollama create
 └── tests/

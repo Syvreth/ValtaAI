@@ -11,6 +11,7 @@ from valta.engineer import run_goal
 from valta.ingest import ingest_path
 from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
+from valta.practice import Practice
 from valta.prompt import load_rules
 from valta.research import research_once
 from valta.status import project_status
@@ -225,6 +226,52 @@ def eval_cmd(
 
 
 @app.command()
+def practice(
+    count: int = typer.Option(20, "--count", "-n", help="How many problems to try."),
+    train_after: bool = typer.Option(
+        False, "--train", help="Fine-tune afterwards, if enough examples are waiting. The eval gate still applies."
+    ),
+    keep_known: bool = typer.Option(
+        False, "--keep-known", help="Also save problems the personal model already solves."
+    ),
+):
+    """The teacher sets coding problems, tests check the answers, and what the 3B gets wrong is saved for training."""
+    settings, memory, _tools, client = _stack()
+    if not client.healthy(settings.heavy_host):
+        raise typer.BadParameter("The RX 6600 server is down. Run scripts/start-ollama.ps1.")
+    student = None
+    if client.healthy(settings.self_host):
+        student = baseline_model(settings)
+        typer.echo(f"Checking each problem against {student} so only what it gets wrong is kept.")
+    else:
+        typer.echo("The GTX 1660 server is down, so every verified problem is kept without checking the 3B.")
+    session = Practice(settings, memory, client, student_model=student, keep_known=keep_known)
+
+    def show(index: int, outcome) -> None:
+        label = {"saved": "saved", "known": "known", "rejected": "skipped", "unsolved": "unsolved"}[outcome.kind]
+        typer.echo(f"[{index}/{count}] {label:<8} {outcome.name or '-':<24} {outcome.note}")
+
+    try:
+        stats = session.run(count, on_progress=show)
+    except KeyboardInterrupt:
+        stats = session.stats
+        typer.echo("Stopped.")
+    typer.echo(stats.summary())
+    for note in stats.notes:
+        typer.echo(note)
+    if stats.error:
+        typer.echo(f"Stopped early: {stats.error}")
+    waiting = memory.example_count()
+    typer.echo(f"{waiting} example(s) are waiting for the next fine-tune (threshold {settings.train_threshold}).")
+    if not train_after:
+        return
+    if waiting < settings.train_threshold:
+        typer.echo("Not enough yet, so no training. Run `valta practice` again.")
+        return
+    _train(settings, memory, client)
+
+
+@app.command()
 def train(
     rollback_model: bool = typer.Option(False, "--rollback", help="Restore the previous valta Modelfile."),
     create_only: bool = typer.Option(False, "--create-only", help="Register an existing GGUF as valta."),
@@ -242,6 +289,11 @@ def train(
         modelfile = write_modelfile(settings, Path(gguf))
         create_valta(settings, client, modelfile)
         return
+    _train(settings, memory, client, skip_eval)
+
+
+def _train(settings, memory, client, skip_eval: bool = False) -> None:
+    """Build pairs, fine-tune, score, and promote only if the new model did not get worse."""
     if not skip_eval and not client.healthy(settings.self_host):
         raise typer.BadParameter(
             "The GTX 1660 server is down. It is needed to score the new model. "
