@@ -21,8 +21,10 @@ repair_rounds = 2
 
 extra_models = []
 
-# Longest training example in tokens. A 6 GB card cannot take much more than 2048.
-train_max_len = 1024
+# Longest training example in tokens; longer ones are skipped. Memory grows with this, mostly in the output
+# layer (about 150,000 token scores per position). On the 6 GB GTX 1660, 1024 filled the card and spilled into
+# system RAM (about 58 s per step); 768 keeps 98% of a typical dataset. If training still crawls, try 640.
+train_max_len = 768
 # How far a new fine-tune may score below the current model on the coding eval and still be promoted (0.1 = 10%).
 # 0 means it must match or beat the current score. With 12 eval tasks, 0.1 lets a model that lost a task through.
 eval_tolerance = 0.0
