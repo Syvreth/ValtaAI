@@ -290,11 +290,13 @@ def find_converter() -> str | None:
     found = os.environ.get("LLAMA_CPP_CONVERT") or shutil.which("convert_hf_to_gguf.py")
     if found:
         return found
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        default = Path(local) / "llama.cpp" / "convert_hf_to_gguf.py"
-        if default.is_file():
-            return str(default)
+    # Some terminals start without LOCALAPPDATA, so the home folder's AppData\Local is tried as well.
+    roots = [os.environ.get("LOCALAPPDATA"), str(Path.home() / "AppData" / "Local")]
+    for root in roots:
+        if root:
+            default = Path(root) / "llama.cpp" / "convert_hf_to_gguf.py"
+            if default.is_file():
+                return str(default)
     return None
 
 

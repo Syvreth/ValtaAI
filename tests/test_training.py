@@ -173,7 +173,13 @@ def test_converter_is_found_in_a_local_llama_cpp_clone(tmp_path: Path, monkeypat
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert find_converter() == str(script)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     assert find_converter() is None
+    monkeypatch.delenv("LOCALAPPDATA")
+    home_script = tmp_path / "home" / "AppData" / "Local" / "llama.cpp" / "convert_hf_to_gguf.py"
+    home_script.parent.mkdir(parents=True)
+    home_script.write_text("", encoding="utf-8")
+    assert find_converter() == str(home_script)
 
 
 def test_resume_finds_the_newest_merge_and_the_examples_it_trained_on(tmp_path: Path):
