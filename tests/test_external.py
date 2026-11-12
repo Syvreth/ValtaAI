@@ -37,6 +37,65 @@ def test_sharegpt_turns_become_alternating_messages():
     assert to_messages("not a list") is None
 
 
+def test_records_in_every_common_layout_become_messages():
+    from valta.external import record_messages
+
+    pair = lambda q, a: [{"role": "user", "content": q}, {"role": "assistant", "content": a}]  # noqa: E731
+    assert record_messages({"instruction": "Sum a list.", "response": "```python\nsum(xs)\n```"}) == pair(
+        "Sum a list.", "```python\nsum(xs)\n```"
+    )
+    assert record_messages({"query": "Q?", "answer": "A."}) == pair("Q?", "A.")
+    assert record_messages({"problem": "P", "solution": "def f():\n    return 1"}) == pair(
+        "P", "```\ndef f():\n    return 1\n```"  # bare code gets a fence
+    )
+    # InstructCoder: the code to change is the input, and the answer is the whole changed code.
+    edit = {"instruction": "Sort first.", "input": "def median(xs):\n    return xs[0]", "output": "def median(xs):\n    return sorted(xs)[0]"}
+    assert record_messages(edit) == pair(
+        "Sort first.\n\n```\ndef median(xs):\n    return xs[0]\n```", "```\ndef median(xs):\n    return sorted(xs)[0]\n```"
+    )
+    chat = {"messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]}
+    assert record_messages(chat) == pair("hi", "hello")
+    sharegpt = {"conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}], "question": "other"}
+    assert record_messages(sharegpt) == pair("q", "a")
+    assert record_messages({"instruction": "no answer"}) is None
+
+
+def test_column_datasets_import_without_langdetect_and_with_where(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    records = [
+        {"query": f"Write function number {index}.", "answer": f"def f{index}():\n    return {index}", "lang": lang}
+        for index, lang in enumerate(["python", "java", "python", "python"])
+    ]
+    stats = import_dataset(settings, memory, "m-a-p/CodeFeedback", records=records, where=["lang=python"])
+    assert stats.kept == 3 and stats.skipped == {"where": 1} and stats.duplicate == 0  # no id: still distinct
+    again = import_dataset(settings, memory, "m-a-p/CodeFeedback", records=records, where=["lang=python"])
+    assert again.duplicate == 3 and again.kept == 0
+    tagged = [{"messages": [{"role": "user", "content": f"q{n}"}, {"role": "assistant", "content": "a"}], "source": s}
+              for n, s in enumerate(["ai2/tulu_v3.9_wildchat_100k", "ai2/oasst1_converted", "ai2/personas_math"])]
+    kept = import_dataset(settings, memory, "allenai/tulu", records=tagged, where=["source=wildchat", "source=OASST"])
+    assert kept.kept == 2 and kept.skipped == {"where": 1}
+
+
+def test_records_without_langdetect_must_look_english_for_lang_en(tmp_path: Path):
+    from valta.external import looks_english
+
+    spanish = "¿Por qué crees que cada año es más difícil tener una casa propia en comparación con hace veinte años?"
+    catalan = "Com es fa una truita de patates? Explica-ho pas a pas perquè ho pugui fer a casa amb la meva família."
+    english = "Why is it harder every year to buy a house compared to twenty years ago? Explain it for me."
+    assert not looks_english(spanish) and not looks_english(catalan) and looks_english(english)
+    code_prompt = "Use descriptive names like calculate_total_cost instead of calc_tc in the billing module.\n```\ndef calc_tc(x):\n    return x\n```"
+    assert looks_english(code_prompt) and looks_english("def f(x):\n    return x")  # code alone says nothing
+
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    records = [{"messages": [{"role": "user", "content": text}, {"role": "assistant", "content": "Here you go."}]}
+               for text in (spanish, english, catalan)]
+    stats = import_dataset(settings, memory, "allenai/tulu", records=records)
+    assert stats.kept == 1 and stats.skipped == {"language": 2}
+    assert import_dataset(settings, memory, "allenai/tulu", records=records, lang=None).kept == 2  # the rest
+
+
 def test_ability_filter_reads_nested_labels():
     record = {"label": {"ability_en": ["Code Generation"], "cate_ability_en": ["programming and software"]}}
     assert "code generation" in label_words(record["label"])

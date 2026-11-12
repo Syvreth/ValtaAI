@@ -350,9 +350,19 @@ def _drain_facts() -> None:
             _fact_queue.task_done()
 
 
-def wait_for_facts() -> None:
-    """Block until every queued exchange has been read for facts."""
-    _fact_queue.join()
+def wait_for_facts(timeout: float | None = None) -> bool:
+    """Block until every queued exchange has been read for facts, or `timeout` seconds pass. True when none is left."""
+    with _fact_queue.all_tasks_done:
+        return _fact_queue.all_tasks_done.wait_for(lambda: not _fact_queue.unfinished_tasks, timeout)
+
+
+def save_pending_facts(timeout: float = 120) -> None:
+    """Call on the way out. The fact thread dies with the program, so let it finish what is queued first."""
+    if not _fact_queue.unfinished_tasks:
+        return
+    print("Saving what Valta learned from the last messages...", flush=True)
+    if not wait_for_facts(timeout):
+        print(f"Stopped waiting after {timeout:.0f} seconds. Facts from the last messages were not saved.")
 
 
 def _capture_facts(exchanges: list[_Exchange]) -> None:
@@ -398,6 +408,7 @@ def chat_loop(settings: Settings, memory: Memory, tools: ToolRunner, client: Oll
         _chat_turns(settings, memory, tools, client, history)
     finally:
         stop.set()
+        save_pending_facts()
 
 
 def _chat_turns(settings, memory, tools, client, history: list[dict]) -> None:

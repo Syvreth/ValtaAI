@@ -24,7 +24,7 @@ Memory, books, fine-tunes, and your private root rules stay on disk. They are no
 Chat takes the whole screen. When the crew has work, an Activity panel slides in on the right. Close it with Esc and it stays closed until something new needs a look.
 
 ```
- valta                              ● teacher Qwen2.5-Coder-7B   ● personal qwen2.5-coder:3b
+ valta                              ● teacher qwen3.6:35b        ● personal qwen2.5-coder:3b
 
  ❯ Build me a calculator                    │ Activity (1)  Changes  Memory  Models  Approvals
    Queued work a1b2c3d4: Build me a ca…     │
@@ -96,11 +96,26 @@ Ollama cannot split one model across an NVIDIA card and an AMD card. Valta runs 
 
 | Role | Default model | Where it runs |
 | --- | --- | --- |
-| Teacher | Qwen2.5-Coder-7B-Instruct Q4_K_M | Port 11434, Vulkan. Research, planning, coding, review. |
+| Teacher | `qwen3.6:35b` | Port 11434, Vulkan on the RX 6600, experts in system RAM. Research, planning, coding, review. |
 | Embeddings | `nomic-embed-text` | Port 11434, with the teacher. |
 | Personal | `qwen2.5-coder:3b`, later `valta` | Port 11435, CUDA. Conversation about you, after a fine-tune. |
 
-The 7B stays the model that researches and writes code. The 3B is the one that can be fine-tuned on a 6GB card. After `ollama create valta`, personal conversation can route to that model. Coding and research stay on the teacher, with memory in the prompt.
+The teacher researches and writes code. The 3B is the one that can be fine-tuned on a 6GB card. After `ollama create valta`, personal conversation can route to that model. Coding and research stay on the teacher, with memory in the prompt.
+
+### Choosing the teacher
+
+`qwen3.6:35b` is a mixture-of-experts model: 35B parameters, about 3B of them used per token. Ollama puts about 5 GB of it on the RX 6600 and leaves the experts in system RAM, file-mapped, so it fits beside the personal model and training on the GTX 1660. It needs about 17 GB of free RAM; with 32 GB, a training run and the teacher can share the machine, and Windows drops mapped pages it needs back.
+
+Measured on this machine (HumanEval+ through `valta eval --plus`; speed from a 2,300-token coding prompt):
+
+| Teacher | HumanEval+ | Where | Context | Writing | Reading the prompt |
+| --- | --- | --- | --- | --- | --- |
+| `qwen3.6:35b` | 148/164 (90.2%) | RX 6600 + system RAM | 32K | 27 tok/s | 86 tok/s |
+| `qwen2.5-coder:14b` | 146/164 (89.0%) | both cards (combined mode) | 8K | 19 tok/s | 169 tok/s |
+| Qwen2.5-Coder-7B Q4_K_M | 135/164 (82.3%) | RX 6600 | 32K | 40 tok/s | 240 tok/s |
+| `qwen2.5-coder:3b` (personal base) | 131/164 (79.9%) | GTX 1660 | 32K | | |
+
+At 32K context the 14B only fit 80% on the two cards and wrote 7 tok/s. The 35B reads long prompts more slowly than the 7B, but Ollama keeps the start of a conversation cached, so a crew job mostly pays for what is new each round.
 
 Hosts, context length, research limits, and the training threshold live in `config.toml`.
 
@@ -119,11 +134,11 @@ ollama ps                                      # PROCESSOR should read 100% GPU
 .\.venv\Scripts\valta.exe eval --teacher --model qwen2.5-coder:14b
 ```
 
-If the eval beats the 7B, set `teacher_model = "qwen2.5-coder:14b"` in `config.toml`. Go back with `stop-ollama.ps1`, then `start-ollama.ps1` with no mode.
+If the eval beats the current teacher, set `teacher_model` in `config.toml` to it. Go back with `stop-ollama.ps1`, then `start-ollama.ps1` with no mode. Measured here, the 14B lost to `qwen3.6:35b`, which needs no combined mode (see Choosing the teacher).
 
 - In combined mode there is no server on 11435: no personal model, and `valta train`, `valta practice` and plain `valta eval` stop with a message. Chat falls back to the teacher.
 - Training cannot use both cards. PyTorch drives NVIDIA through CUDA and AMD through ROCm, one training run cannot mix them, and the RX 6600 has no supported PyTorch on Windows. Training stays on the GTX 1660, in separate mode.
-- Splitting a model across two cards over PCIe is slower than one card holding it. The 14B will answer more slowly than the 7B. Whether it is better enough is what the eval is for.
+- Splitting a model across two cards over PCIe is slower than one card holding it. The 14B answered at half the 7B's speed.
 - `ollama ps` showing a CPU share means the model did not fit in the two cards' memory. `data\logs\ollama-combined.err.log` lists how many layers went to each device.
 
 ## Quick start
@@ -172,7 +187,7 @@ Training saves its progress every `checkpoint_steps` steps (default 25, about 25
 
 Training leaves the frozen word-embedding table in 16-bit. peft's usual preparation converts it to 32-bit, which costs about 0.6 GB on a 6 GB card for weights that never train. Only the small norm weights go to 32-bit. `train_fp32_embeddings = true` in `config.toml` restores peft's behaviour if a run ever trains unstably.
 
-`valta train --max-examples 500` makes a shorter run: imported-dataset pairs are trimmed first, and your own corrections and verified work are always kept. The current model's eval score is remembered with its Ollama digest, so when nothing changed since it was last scored, the next run skips that ten-minute step. `valta train --rollback` restores the previous Modelfile, or the base model when there is none.
+`valta train --max-examples 500` makes a shorter run: imported-dataset pairs are trimmed first, and your own corrections and verified work are always kept. The eval scores of the current model and the base model are remembered with their Ollama digests, so a model that has not changed since it was last scored is not scored again, which saves about ten minutes each. `valta train --rollback` restores the previous Modelfile, or the base model when there is none.
 
 ## Commands
 
@@ -190,9 +205,9 @@ Opening `valta` with no command is the control center. The commands below are th
 | `valta memory` | List stored records. |
 | `valta forget <id>` | Delete one record and its vector. |
 | `valta rules` | Print the root rules that are loaded. |
-| `valta eval` | Score a model on the coding eval. `--teacher` scores the 7B instead. `--plus` runs HumanEval+ on the teacher's server instead, `--plus --mbpp` runs MBPP+. |
+| `valta eval` | Score a model on the coding eval. `--teacher` scores the teacher instead. `--plus` runs HumanEval+ on the teacher's server instead, `--plus --mbpp` runs MBPP+. |
 | `valta practice` | The teacher sets coding problems, tests check the answers, and what the 3B gets wrong is saved for training. `--count` sets how many to try, `--train` fine-tunes afterwards. |
-| `valta train` | Build pairs, QLoRA the 3B, score it, and replace `valta` only if it did not get worse. `--skip-eval` promotes without scoring. `--resume` picks up from merged weights. `--rollback` goes back one model. |
+| `valta train` | Build pairs, QLoRA the 3B, score it, and replace `valta` only if it scores at least as well as both the current model and the stock 3B. `--skip-eval` promotes without scoring. `--resume` picks up from merged weights. `--rollback` goes back one model. |
 
 From the chat itself, Valta can decide to ingest a path you mention, research a topic, or start a job. You do not have to switch commands.
 
@@ -246,7 +261,10 @@ A public instruction dataset on Hugging Face can be mixed in, for example [BAAI/
 
 - Gated datasets (Infinity-Instruct is one) need you to log in on the dataset page, accept its conditions, and sign in here with your own token.
 - `--min-answer 200` skips conversations whose final answer is shorter than 200 characters, such as one-line "describe this function" replies. `--code-only` keeps only answers that contain code. In a first import of Infinity-Instruct's code slice, about half the answers were one-liners.
-- `peek` shows each record's language, labels and first question, so you can pick `--ability` words. `--ability` matches any word in the record's labels and can be repeated. `--lang` defaults to `en`. `--scan` caps how many records are read.
+- `peek` shows each record's columns, language, labels and first question, so you can pick filters. `--ability` matches any word in the record's labels and can be repeated. `--where COLUMN=TEXT` keeps records whose column contains the text, such as `--where lang=python` or `--where source=wildchat`; repeat it to keep records that match any. `--scan` caps how many records are read.
+- `--lang` defaults to `en`. It is checked against a record's `langdetect` field; for datasets without one, English is judged from the prose, with code set aside, since many datasets mix languages.
+- Records can be ShareGPT `conversations`, chat `messages`, or one question and one answer column: `instruction`/`response`, `instruction` + `input`/`output`, `query`/`answer`, `problem`/`solution`, `question`/`answer`, `prompt`/`completion`. Bare code in an answer gets a fence.
+- `scripts\import-datasets.ps1` imports the current mix, picked from Hugging Face's most-downloaded instruction datasets: tested Python answers (KodCode, self-oss-instruct, OpenCoder), code edits (InstructCoder), harder requests (CodeFeedback, Magicoder, Python only), and English conversation from tulu-3. Each line in it names the dataset's license.
 - Conversations are converted to user and assistant turns, and the dataset's own system prompts are dropped, because the root rules are the system message of every pair. Training learns from the last answer. Records longer than `train_max_len`, that overlap an eval task, or that conflict with the root rules are skipped.
 - They are stored apart from your own examples, in the `external_examples` table, and do not count toward `train_threshold`. Each fine-tune mixes in at most `external_max_pairs` (default 2000).
 - Check the dataset's license and the licenses of what it was built from before training on it. Infinity-Instruct is CC BY-SA 4.0 with its own conditions, and draws on other datasets with their own terms.
@@ -271,7 +289,7 @@ A public instruction dataset on Hugging Face can be mixed in, for example [BAAI/
 
 What this can and cannot do:
 
-- The 3B can get as good as the 7B is at what tests can check. It cannot get better than the 7B, and the 7B does not improve by itself here.
+- The 3B can get as good as the teacher is at what tests can check. It cannot get better than the teacher, and the teacher does not improve by itself here. With `qwen3.6:35b` (90% on HumanEval+ against the 3B's 80%) there is room between them.
 - Most problems get dropped. Expect a small share of each run to become examples, and expect hundreds before a fine-tune changes much.
 - The tests are written by the same model that solves the problems. The agreement check and the stub check remove most bad problems, not all of them.
 - Model-written code is run in a temporary folder with a timeout. Code that opens files, starts processes, uses the network or reads the keyboard is refused before it runs. That stops honest mistakes. It is not a sandbox against code written to get around it.
@@ -280,7 +298,7 @@ What this can and cannot do:
 
 `valta eval` asks a model for twelve small Python functions at temperature 0 and runs each reply against hidden asserts. Add your own tasks as JSON in `data/evals/` (`[{"id", "prompt", "tests"}]`; `tests` runs after `from solution import *`). Training pairs that contain an eval prompt are dropped, so the eval stays a fair test.
 
-`valta train` scores the current personal model, trains, loads the result as `valta-candidate`, and scores it. It replaces `valta` only if the new score is at least the old one minus `eval_tolerance`. The default is 0, so the new model has to match or beat the old score. With twelve tasks, any tolerance below about 0.09 still means no lost task is allowed, and 0.1 lets a model that lost one task through. Scores are kept in `data/state.json` under `eval_history`.
+`valta train` scores the current personal model and the base model (`self_model`, the stock 3B), trains, loads the result as `valta-candidate`, and scores it. It replaces `valta` only if the new score is at least the better of those two scores minus `eval_tolerance`. The default is 0, so the new model has to match or beat both. Comparing with the current model alone let losses add up: a fine-tune promoted one task worse became the bar the next one only had to tie. With twelve tasks, any tolerance below about 0.09 still means no lost task is allowed, and 0.1 lets a model that lost one task through. Scores are kept in `data/state.json` under `eval_history`.
 
 Limits worth knowing:
 

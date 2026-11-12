@@ -38,6 +38,7 @@ class Settings:
     doc_qa_pairs: int = 20
     train_fp32_embeddings: bool = False
     train_gradient_checkpointing: bool = True
+    train_learning_rate: float = 1e-4
     native_tools: bool = False
     model_options: dict = field(default_factory=dict)
 
@@ -143,6 +144,7 @@ def load_settings(root: Path | None = None) -> Settings:
         doc_qa_pairs=int(raw.get("doc_qa_pairs", 20)),
         train_fp32_embeddings=bool(raw.get("train_fp32_embeddings", False)),
         train_gradient_checkpointing=bool(raw.get("train_gradient_checkpointing", True)),
+        train_learning_rate=float(raw.get("train_learning_rate", 1e-4)),
         native_tools=bool(raw.get("native_tools", False)),
         model_options=dict(raw.get("model_options", {})),
     )

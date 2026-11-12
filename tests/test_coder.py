@@ -85,6 +85,16 @@ def test_replace_swaps_exactly_one_block_and_keeps_line_endings(tmp_path: Path):
     assert (project / "crlf.py").read_bytes() == b"a = 1\r\nb = 3\r\nc = 4\r\n"
 
 
+def test_replace_leaves_the_rest_of_a_mixed_line_ending_file_alone(tmp_path: Path):
+    project = _project(tmp_path)
+    tools = _tools(tmp_path, project)
+    (project / "mixed.py").write_bytes(b"a = 1\r\nb = 2\nc = 3\nd = 4\r\n")
+    tools.replace_text("mixed.py", "b = 2\nc = 3", "b = 20\nc = 30")
+    assert (project / "mixed.py").read_bytes() == b"a = 1\r\nb = 20\nc = 30\nd = 4\r\n"
+    tools.replace_text("mixed.py", "a = 1\nb = 20", "a = 10\nb = 2")  # a block that spans both endings matches
+    assert (project / "mixed.py").read_bytes() == b"a = 10\r\nb = 2\nc = 30\nd = 4\r\n"
+
+
 def test_replace_refuses_a_missing_or_repeated_block_and_protected_files(tmp_path: Path):
     project = _project(tmp_path)
     tools = _tools(tmp_path, project)
@@ -106,6 +116,58 @@ def test_parse_action_reads_a_replace_and_keeps_indentation():
     )
     assert action is not None and action.name == "replace"
     assert (action.path, action.old, action.new) == ("calc.py", "        return self.value", "        return 0")
+
+
+def test_file_text_that_looks_like_an_action_or_end_stays_file_text():
+    # Editing Valta's own engineer.py: the new text holds ACTION lines and an END line of its own.
+    new = 'HELP = """\nACTION read_file\nPATH relative/path\nEND\n"""'
+    action = parse_action(f"ACTION replace\nPATH valta/engineer.py\nOLD\nHELP = ''\nNEW\n{new}\nEND\n")
+    assert action is not None and action.name == "replace"
+    assert (action.path, action.old, action.new) == ("valta/engineer.py", "HELP = ''", new)
+
+    sql = "CREATE TRIGGER t AFTER INSERT ON x\nBEGIN\n  SELECT 1;\nEND\n;"
+    action = parse_action(f"ACTION write_file\nPATH schema.sql\nCONTENT\n{sql}\nEND")
+    assert action is not None and (action.name, action.path, action.content) == ("write_file", "schema.sql", sql)
+
+
+def test_the_last_action_wins_after_talk_or_an_example():
+    action = parse_action(
+        "I could list the folder:\nACTION list_directory\nPATH .\nEND\n"
+        "But I know the file, so:\nACTION read_file\nPATH calc.py\nEND"
+    )
+    assert action is not None and (action.name, action.path) == ("read_file", "calc.py")
+    assert parse_action("Nothing to do here.") is None
+
+
+def test_a_replace_without_new_is_sent_back_instead_of_deleting_the_old_lines():
+    from valta.engineer import REPLACE_SHAPE, _example_action
+
+    action = parse_action("ACTION replace\nPATH calc.py\nOLD\n        return self.value\nEND")
+    assert action is not None and action.problem == REPLACE_SHAPE
+    assert _example_action(action) == REPLACE_SHAPE
+
+
+def test_facts_queued_at_exit_are_waited_for(monkeypatch):
+    import threading
+
+    import valta.chat as chat
+
+    release = threading.Event()
+    seen = []
+
+    def slow_capture(group):
+        release.wait(5)
+        seen.extend(group)
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(chat, "_capture_facts", slow_capture)
+    exchange = SimpleNamespace(tools=None, host="http://h", model="m")
+    chat._queue_facts(exchange)
+    assert chat.wait_for_facts(timeout=0.05) is False  # still extracting
+    release.set()
+    chat.save_pending_facts(timeout=5)
+    assert seen == [exchange] and chat.wait_for_facts(timeout=0)
 
 
 class _Scripted:

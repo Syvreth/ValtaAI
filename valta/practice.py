@@ -1,6 +1,6 @@
 """Self-practice: how Valta gets better without being asked.
 
-The teacher (the 7B) invents a small coding problem and tests for it. The problem is vetted before it is
+The teacher (teacher_model) invents a small coding problem and tests for it. The problem is vetted before it is
 trusted: the tests must fail against an empty stub, and the teacher must then solve the problem again, from
 the text alone, in a way that passes them. Two independent writings that agree through a test is the check
 that the problem is sound. The personal model (the 3B) then tries the same problem. When it already passes,
@@ -8,8 +8,8 @@ nothing is learned and the problem is dropped. When it fails, the teacher's veri
 training example for `valta train`, and that command's eval gate still decides whether the result replaces
 the model you have.
 
-This does not make the teacher smarter. The 3B can get as good as the 7B is at what tests can check, and
-no better.
+This does not make the teacher smarter. The 3B can get as good as the teacher is at what tests can check,
+and no better.
 
 Problems never reuse an eval task: names, wording and near-matches are all filtered, so the eval stays a
 fair test of what was learned.

@@ -1,7 +1,10 @@
 heavy_host = "http://127.0.0.1:11434"
 self_host = "http://127.0.0.1:11435"
 
-teacher_model = "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
+# A mixture-of-experts model: 35B in all, about 3B active per token. On the RX 6600 alone, about 5 GB sits on the
+# card and the experts stay in system RAM (file-mapped), at about 27 tokens/s with 32K context. HumanEval+ 148/164,
+# against 135 for Qwen2.5-Coder-7B ("hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M", the previous teacher).
+teacher_model = "qwen3.6:35b"
 self_model = "qwen2.5-coder:3b"
 embed_model = "nomic-embed-text"
 hf_base = "Qwen/Qwen2.5-Coder-3B-Instruct"
@@ -41,7 +44,12 @@ checkpoint_steps = 25
 # Recompute activations in the backward pass to save GPU memory, at the cost of extra compute.
 # Must stay on for the 3B on the 6 GB GTX 1660: off, the first step crashed the process.
 train_gradient_checkpointing = true
-# How far a new fine-tune may score below the current model on the coding eval and still be promoted (0.1 = 10%).
+# How far each training step moves the model. The base model is already a strong instruct model, so a gentle rate
+# keeps more of what it knows: at 2e-4, a fine-tune on 707 imported conversations lost a coding task (9/12 against
+# 10/12). 1e-4 is half that.
+train_learning_rate = 1e-4
+# How far a new fine-tune may score below the better of the current model and the base model (self_model) on the
+# coding eval and still be promoted (0.1 = 10%).
 # 0 means it must match or beat the current score. With 12 eval tasks, 0.1 lets a model that lost a task through.
 eval_tolerance = 0.0
 

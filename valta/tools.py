@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 import sys
@@ -110,7 +111,8 @@ class ToolRunner:
         return f"Wrote {resolved.relative_to(self.project)}"
 
     def replace_text(self, path: str, old: str, new: str) -> str:
-        """Swap one block of an existing file. `old` must appear exactly once; the file's line endings are kept."""
+        """Swap one block of an existing file. `old` must appear exactly once. Only that block changes: a line
+        of `old` matches whether the file ends it with \\n or \\r\\n, and the new lines take the block's ending."""
         resolved = self._inside_project(Path(path))
         self.refuse_rules_mutation(resolved)
         if self._protected(resolved):
@@ -124,14 +126,22 @@ class ToolRunner:
             text = resolved.read_bytes().decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ToolError(f"{path} is not UTF-8 text, so it cannot be edited in place.") from exc
-        newline = "\r\n" if "\r\n" in text else "\n"
-        body = text.replace("\r\n", "\n")
-        found = body.count(old)
-        if found == 0:
+        pattern = re.compile(r"\r?\n".join(re.escape(line) for line in old.split("\n")))
+        matches = list(pattern.finditer(text))
+        if not matches:
             raise ToolError(f"OLD was not found in {path}. Copy it exactly from read_file, indentation included.")
-        if found > 1:
-            raise ToolError(f"OLD appears {found} times in {path}. Include more of the lines around it so it matches once.")
-        resolved.write_bytes(body.replace(old, new, 1).replace("\n", newline).encode("utf-8"))
+        if len(matches) > 1:
+            raise ToolError(
+                f"OLD appears {len(matches)} times in {path}. Include more of the lines around it so it matches once."
+            )
+        match = matches[0]
+        crlf = text.count("\r\n")
+        if "\n" in match.group(0):
+            newline = "\r\n" if "\r\n" in match.group(0) else "\n"
+        else:  # a one-line block: take the file's usual ending
+            newline = "\r\n" if crlf > text.count("\n") - crlf else "\n"
+        text = text[: match.start()] + new.replace("\n", newline) + text[match.end() :]
+        resolved.write_bytes(text.encode("utf-8"))
         return f"Replaced one block in {resolved.relative_to(self.project)}"
 
     def run_tests(self, command: str = "python -m pytest -q") -> str:

@@ -330,6 +330,7 @@ def should_promote(baseline: EvalResult | None, candidate: EvalResult, tolerance
     drop = baseline.score - candidate.score
     if drop > tolerance + 1e-9:
         return False, (
-            f"Candidate dropped {drop:.0%} against the baseline, more than the {tolerance:.0%} allowed."
+            f"It scored {candidate.passed}/{candidate.total}, {drop:.0%} below {baseline.summary()}, "
+            f"more than the {tolerance:.0%} allowed."
         )
-    return True, f"Candidate is within {tolerance:.0%} of the baseline or better."
+    return True, f"It scored {candidate.passed}/{candidate.total}, within {tolerance:.0%} of {baseline.summary()} or better."

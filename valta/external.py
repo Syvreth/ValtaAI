@@ -5,9 +5,13 @@ filtered, converted to Valta's message format, and stored in the `external_examp
 are kept. `valta train` then mixes in at most `external_max_pairs` of them, so a public dataset cannot
 drown out your corrections and verified work.
 
-Records are expected in the ShareGPT shape Infinity-Instruct uses:
-    {"id": ..., "conversations": [{"from": "human", "value": ...}, {"from": "gpt", "value": ...}],
-     "langdetect": "en", "label": {"ability_en": [...], "cate_ability_en": [...]}, ...}
+Records may come in any of the common layouts (see record_messages):
+    ShareGPT, as Infinity-Instruct and KodCode use:
+        {"id": ..., "conversations": [{"from": "human", "value": ...}, {"from": "gpt", "value": ...}],
+         "langdetect": "en", "label": {"ability_en": [...], "cate_ability_en": [...]}, ...}
+    chat messages, as tulu-3 uses: {"messages": [{"role": "user", "content": ...}, ...], "source": ...}
+    one question column and one answer column: instruction/response, instruction + input/output,
+        query/answer, problem/solution, question/answer, prompt/completion.
 """
 
 from __future__ import annotations
@@ -30,6 +34,9 @@ ROLE_NAMES = {
     "model": "assistant",
 }
 SKIPPED_ROLES = {"system"}  # the root rules are the system message of every training pair
+# For datasets with one question and one answer per record. The first column present with text wins.
+QUESTION_COLUMNS = ("instruction", "query", "problem", "question", "prompt")
+ANSWER_COLUMNS = ("response", "output", "answer", "solution", "completion")
 CHARS_PER_TOKEN = 3  # a cautious estimate; tokenize_example measures exactly at training time
 RULES_TOKEN_ALLOWANCE = 200
 
@@ -81,6 +88,69 @@ def to_messages(turns) -> list[dict] | None:
     return messages
 
 
+def record_messages(record: dict) -> list[dict] | None:
+    """A record as user and assistant messages, whatever common layout its dataset uses, or None.
+
+    For a question-and-answer record, an `input` column (the code to change, in InstructCoder) is added under
+    the question, and code without a fence gets one, so every answer shows code the way chat replies do.
+    """
+    if record.get("conversations") is not None:
+        return to_messages(record["conversations"])
+    if record.get("messages") is not None:
+        return to_messages(record["messages"])
+    question = _first_text(record, QUESTION_COLUMNS)
+    answer = _first_text(record, ANSWER_COLUMNS)
+    if question is None or answer is None:
+        return None
+    extra = record.get("input")
+    if isinstance(extra, str) and extra.strip():
+        question = f"{question.strip()}\n\n{_fenced(extra)}"
+    return to_messages([{"role": "user", "content": question}, {"role": "assistant", "content": _fenced(answer)}])
+
+
+def _first_text(record: dict, columns: tuple[str, ...]) -> str | None:
+    return next((record[column] for column in columns if isinstance(record.get(column), str) and record[column].strip()), None)
+
+
+def _fenced(text: str) -> str:
+    """Bare code in a fence. Text that already has a fence, or has no code, is returned as it is."""
+    stripped = text.strip()
+    if "```" in stripped or not has_code(stripped):
+        return stripped
+    return f"```\n{stripped}\n```"
+
+
+_FENCE = re.compile(r"```.*?(```|$)", re.S)
+_CODE_HINT = re.compile(r"^\s|[=;{}]|[(\[,)\]]\s*$")  # indented, an assignment or brace, or ends like code
+_IDENTIFIER = re.compile(r"`[^`]*`|\S*[_./\\]\S*")  # `inline code`, snake_case, dotted.names and paths
+# Frequent English words that are rare as words in other languages ("a" and "i" are common in Spanish and Catalan).
+_COMMON_ENGLISH = {"the", "and", "is", "to", "of", "in", "you", "it", "that", "for", "with", "this", "can", "are", "be"}
+
+
+def looks_english(text: str) -> bool:
+    """A guess from the prose, for records with no `langdetect` field. Fenced code and lines that look like
+    code are set aside first. Too little prose to judge counts as English."""
+    lines = _FENCE.sub(" ", text).splitlines()
+    prose = _IDENTIFIER.sub(" ", " ".join(line for line in lines if not (_CODE_HINT.search(line) or _CODE_LINE.match(line))))
+    letters = [char for char in prose if char.isalpha()]
+    if len(letters) >= 40 and sum(char.isascii() for char in letters) / len(letters) < 0.9:
+        return False
+    words = re.findall(r"[^\W\d_]+", prose.lower())  # whole words, accents included: "año" is not "a" + "o"
+    return len(words) < 12 or sum(word in _COMMON_ENGLISH for word in words) / len(words) >= 0.08
+
+
+def matches_where(record: dict, conditions: list[str]) -> bool:
+    """True with no conditions, or when any COLUMN=TEXT condition finds TEXT in that column, ignoring case."""
+    if not conditions:
+        return True
+    for condition in conditions:
+        column, _, text = condition.partition("=")
+        value = record.get(column.strip())
+        if value is not None and text.strip().lower() in str(value).lower():
+            return True
+    return False
+
+
 def label_words(label) -> list[str]:
     """Every string inside a record's `label`, lowercased, whatever its nesting."""
     if isinstance(label, str):
@@ -111,7 +181,10 @@ def record_id(record: dict) -> str:
     raw = record.get("id")
     if raw not in (None, ""):
         return str(raw)
-    blob = json.dumps(record.get("conversations"), sort_keys=True, ensure_ascii=False)
+    if record.get("conversations") is not None:  # how ShareGPT records without an id have always been keyed
+        blob = json.dumps(record.get("conversations"), sort_keys=True, ensure_ascii=False)
+    else:
+        blob = json.dumps(record, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
@@ -152,11 +225,15 @@ def import_dataset(
     on_progress: Callable[[ImportStats], None] | None = None,
     min_answer: int = 0,
     code_only: bool = False,
+    where: list[str] | None = None,
 ) -> ImportStats:
     """Keep up to `limit` conversations that pass the filters. `records` replaces streaming, for tests.
 
-    `min_answer` skips conversations whose final answer is shorter than that many characters, such as
-    one-line "describe this function" replies. `code_only` keeps only final answers that contain code.
+    `lang` is checked against a record's `langdetect` field. A record without one is kept, except that for
+    "en" its prose has to look English (see looks_english), since many datasets mix languages. `min_answer`
+    skips conversations whose final answer is shorter than that many characters, such as one-line "describe
+    this function" replies. `code_only` keeps only final answers that contain code. `where` keeps records
+    where any COLUMN=TEXT condition holds, such as lang=python or source=wildchat.
     """
     from valta.train import conflicts_with_rules
 
@@ -172,15 +249,24 @@ def import_dataset(
             stats.seen += 1
             if on_progress is not None and stats.seen % 500 == 0:
                 on_progress(stats)
-            if lang and str(record.get("langdetect") or "").lower() != lang.lower():
+            detected = record.get("langdetect")
+            if lang and detected is not None and str(detected).lower() != lang.lower():
                 stats.skip("language")
                 continue
             if not matches_abilities(record, abilities or []):
                 stats.skip("ability")
                 continue
-            messages = to_messages(record.get("conversations"))
+            if not matches_where(record, where or []):
+                stats.skip("where")
+                continue
+            messages = record_messages(record)
             if messages is None:
                 stats.skip("format")
+                continue
+            if lang and lang.lower() == "en" and detected is None and not looks_english(
+                "\n".join(message["content"] for message in messages)
+            ):
+                stats.skip("language")
                 continue
             if sum(len(message["content"]) for message in messages) > max_chars:
                 stats.skip("too long")
@@ -213,19 +299,20 @@ def import_dataset(
 
 
 def peek_dataset(name: str, config: str | None, split: str = "train", count: int = 5) -> list[dict]:
-    """The first few records, cut down to what helps choose filters: language, labels, source, first question."""
+    """The first few records, cut down to what helps choose filters: columns, language, labels, source, and
+    the first question as Valta reads it. `turns` is 0 when Valta cannot read the record's layout."""
     shown = []
     for record in stream_dataset(name, config, split):
-        turns = record.get("conversations") or []
-        first = next((turn.get("value", "") for turn in turns if isinstance(turn, dict)), "")
+        messages = record_messages(record) or []
         shown.append(
             {
                 "id": record.get("id"),
+                "columns": sorted(record),
                 "langdetect": record.get("langdetect"),
                 "source": record.get("source"),
                 "label": record.get("label"),
-                "turns": len(turns),
-                "first": str(first)[:160],
+                "turns": len(messages),
+                "first": messages[0]["content"][:160] if messages else "",
             }
         )
         if len(shown) >= count:

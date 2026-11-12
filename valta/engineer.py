@@ -66,29 +66,46 @@ class Action:
     summary: str = ""
     old: str = ""
     new: str = ""
+    problem: str = ""  # why the action cannot run as written, told back to the model
 
 
 _ACTIONS = {
     "read_file", "list_directory", "search_memory", "replace", "write_file", "run_tests", "done", "ingest", "research", "work"
 }
+# Actions that carry file text. That text may hold lines such as `ACTION read_file` or `END`.
+_FILE_ACTIONS = {"replace", "write_file"}
+REPLACE_SHAPE = (
+    "A replace needs a line OLD, then the exact lines to change, then a line NEW, "
+    "then the lines that take their place, then END."
+)
 
 
 def parse_action(text: str) -> Action | None:
-    marker = "ACTION "
-    start = text.rfind(marker)
-    if start < 0:
+    """The action in a model's reply, or None.
+
+    A reply may talk first, or show another action before the real one, and the last action wins. The one
+    exception is file text: everything after a replace or write_file line belongs to it, up to its last END
+    line, so file text that holds an ACTION or END line is written whole instead of being read as an action.
+    """
+    found = _last_action(text.splitlines())
+    if found is None:
         return None
-    body = text[start + len(marker) :]
-    name, _, rest = body.partition("\n")
-    name = name.strip().lower()
-    if name not in _ACTIONS:
-        return None
+    name, lines = found
+    rest = "\n".join(lines)
     if name == "done":
         return Action(name="done", summary=_section(rest, "SUMMARY"))
     if name == "write_file":
-        return Action(name=name, path=_section(rest, "PATH"), content=_section(rest, "CONTENT"))
+        content = _file_text(lines, _label_at(lines, "CONTENT"), "CONTENT").strip()
+        return Action(name=name, path=_section(rest, "PATH"), content=content)
     if name == "replace":
-        return Action(name=name, path=_section(rest, "PATH"), old=_block(rest, "OLD", "NEW"), new=_block(rest, "NEW"))
+        path = _section(rest, "PATH")
+        old_at = _label_at(lines, "OLD")
+        new_at = _label_at(lines, "NEW", after=old_at)
+        if old_at is None or new_at is None:
+            # Without NEW, the OLD lines would be deleted. Ask again instead.
+            return Action(name=name, path=path, problem=REPLACE_SHAPE)
+        old = _trim_blank(_inline(lines[old_at], "OLD") + lines[old_at + 1 : new_at])
+        return Action(name=name, path=path, old=old, new=_file_text(lines, new_at, "NEW"))
     if name == "run_tests":
         return Action(name=name, command=_section(rest, "CMD") or "python -m pytest -q")
     if name == "search_memory":
@@ -124,24 +141,61 @@ def _section(text: str, label: str) -> str:
     return "\n".join(found).strip()
 
 
-def _block(text: str, label: str, stop: str = "END") -> str:
-    """The lines between a LABEL line and the next `stop` (or END) line, indentation kept.
+def _action_name(line: str) -> str | None:
+    """The action a line names, as in `ACTION read_file`, or None."""
+    start = line.rfind("ACTION ")
+    if start < 0:
+        return None
+    name = line[start + len("ACTION ") :].strip().lower()
+    return name if name in _ACTIONS else None
 
-    Only blank lines at either end are dropped: OLD has to match the file exactly.
-    """
-    found: list[str] | None = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if found is None:
-            if stripped == label:
-                found = []
-            elif line.startswith(label + " "):
-                found = [line[len(label) + 1 :]]
+
+def _last_action(lines: list[str]) -> tuple[str, list[str]] | None:
+    """The last action's name and the lines after its ACTION line, skipping over file text (see parse_action)."""
+    chosen = None
+    index = 0
+    while index < len(lines):
+        name = _action_name(lines[index])
+        if name is None:
+            index += 1
             continue
-        if stripped in {stop, "END"}:
-            break
-        found.append(line)
-    lines = found or []
+        if name in _FILE_ACTIONS:
+            return name, lines[index + 1 :]
+        end = next((at for at in range(index + 1, len(lines)) if lines[at].strip() == "END"), len(lines) - 1)
+        chosen = (name, lines[index + 1 : end + 1])
+        index = end + 1
+    return chosen
+
+
+def _label_at(lines: list[str], label: str, after: int | None = -1) -> int | None:
+    """Index of the first LABEL line after `after`: the label alone on its line, else the label and text."""
+    if after is None:
+        return None
+    candidates = range(after + 1, len(lines))
+    exact = next((at for at in candidates if lines[at].strip() == label), None)
+    if exact is not None:
+        return exact
+    return next((at for at in candidates if lines[at].startswith(label + " ")), None)
+
+
+def _inline(line: str, label: str) -> list[str]:
+    """Text written on the label's own line, as in `OLD x = 1`."""
+    return [line[len(label) + 1 :]] if line.startswith(label + " ") else []
+
+
+def _file_text(lines: list[str], start: int | None, label: str) -> str:
+    """The lines after the LABEL line at `start` up to the last END line, indentation kept. An END line inside
+    the text is kept, since a reply's last END closes its action. Blank lines at either end are dropped."""
+    if start is None:
+        return ""
+    body = _inline(lines[start], label) + lines[start + 1 :]
+    end = max((at for at, line in enumerate(body) if line.strip() == "END"), default=len(body))
+    return _trim_blank(body[:end])
+
+
+def _trim_blank(lines: list[str]) -> str:
+    """The lines joined, without blank lines at either end. Indentation is kept: OLD must match the file exactly."""
+    lines = list(lines)
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
@@ -474,6 +528,8 @@ def _trim_history(history: list[dict]) -> list[dict]:
 
 
 def _example_action(action: Action) -> str | None:
+    if action.problem:
+        return action.problem
     path = action.path.replace("\\", "/")
     if action.name in {"read_file", "write_file", "replace"} and path in {"relative/path", "the/real/file.py"}:
         return "That PATH is the sample from the instructions. Use a real file from the project map."

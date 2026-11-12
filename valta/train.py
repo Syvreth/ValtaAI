@@ -312,7 +312,8 @@ def run_qlora(
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         num_train_epochs=1,
-        learning_rate=2e-4,
+        learning_rate=settings.train_learning_rate,
+        warmup_ratio=0.03,  # a short ramp, so the first steps do not jolt the base model
         fp16=True,
         bf16=False,
         logging_steps=1,
@@ -555,13 +556,18 @@ def modelfile_text(settings: Settings, gguf_path: Path) -> str:
 
 
 def write_modelfile(settings: Settings, gguf_path: Path) -> str:
+    """Write the Modelfile for new `valta` weights, keeping what a rollback should return to."""
     current = settings.models_dir / "valta.Modelfile"
     previous = settings.models_dir / "valta.previous.Modelfile"
-    if current.exists():
+    state = load_state(settings)
+    if current.exists() and state.get("personal_model") == "valta":
         previous.write_text(current.read_text(encoding="utf-8"), encoding="utf-8")
-        state = load_state(settings)
         state["previous_modelfile"] = str(previous)
-        save_state(settings, state)
+    else:
+        # The base model is active, so a rollback goes back to it, not to an older `valta` set aside before.
+        previous.unlink(missing_ok=True)
+        state.pop("previous_modelfile", None)
+    save_state(settings, state)
     modelfile = modelfile_text(settings, gguf_path)
     current.write_text(modelfile, encoding="utf-8")
     return modelfile
@@ -576,31 +582,45 @@ def create_valta(settings: Settings, client: OllamaClient, modelfile: str) -> No
 
 
 def baseline_model(settings: Settings) -> str:
-    """The model the next fine-tune has to beat: whatever personal model is active now."""
+    """The active personal model: the one chat, practice and `valta eval` use on the GTX 1660."""
     return load_state(settings).get("personal_model") or settings.self_model
 
 
 def score_baseline(settings: Settings, client: OllamaClient) -> EvalResult:
-    """The current personal model's eval score. Reused when neither the model's weights nor the eval
-    tasks changed since it was last scored, which saves about ten minutes on the GTX 1660."""
-    model = baseline_model(settings)
+    """The score a new fine-tune has to reach: the better of the active personal model and the base model.
+
+    Against the active model alone, a fine-tune that `eval_tolerance` let through a little worse became the
+    bar for the next one, which then only had to tie it, so losses added up. The base model is the fixed floor.
+    """
+    current = baseline_model(settings)
+    models = [current] if current == settings.self_model else [current, settings.self_model]
+    results = [score_model(settings, client, model) for model in models]
+    bar = max(results, key=lambda result: result.score)  # on a tie, the first: the active model
+    if len(results) > 1:
+        print(f"The new model has to reach the better of the two, {bar.summary()}")
+    return bar
+
+
+def score_model(settings: Settings, client: OllamaClient, model: str) -> EvalResult:
+    """`model`'s eval score on the GTX 1660 server. Reused when neither its weights nor the eval tasks
+    changed since it was last scored, which saves about ten minutes per model."""
     fingerprint = baseline_fingerprint(settings, client, model)
-    cached = load_state(settings).get("baseline_cache") or {}
+    cached = _baseline_cache(load_state(settings)).get(model) or {}
     if fingerprint and cached.get("fingerprint") == fingerprint:
         result = EvalResult(model, int(cached["passed"]), int(cached["total"]))
         print(f"Reusing the score of {model} from {cached.get('time', 'earlier')}: {result.summary()}")
         return result
-    print(f"Scoring the current personal model ({model}) before training...")
+    print(f"Scoring {model}, which the new model is compared against...")
     result = run_eval(settings, client, settings.self_host, model, on_progress=_progress)
     print(result.summary())
-    _save_baseline(settings, fingerprint, result)
+    _save_baseline(settings, model, fingerprint, result)
     return result
 
 
 def remember_baseline(settings: Settings, client: OllamaClient, model: str, result: EvalResult) -> None:
     """Record a score for `model` as it is now, so the next run need not score it again."""
     try:
-        _save_baseline(settings, baseline_fingerprint(settings, client, model), result)
+        _save_baseline(settings, model, baseline_fingerprint(settings, client, model), result)
     except Exception:
         pass  # only a shortcut; the next run scores the model instead
 
@@ -623,16 +643,26 @@ def baseline_fingerprint(settings: Settings, client: OllamaClient, model: str) -
     return f"{model}|{digest}|{task_hash}"
 
 
-def _save_baseline(settings: Settings, fingerprint: str | None, result: EvalResult) -> None:
+def _baseline_cache(state: dict) -> dict[str, dict]:
+    """Saved eval scores by model name. An older state.json held one entry, for the personal model only."""
+    cache = state.get("baseline_cache") or {}
+    if "fingerprint" in cache:
+        return {str(cache["fingerprint"]).split("|", 1)[0]: cache}
+    return dict(cache)
+
+
+def _save_baseline(settings: Settings, model: str, fingerprint: str | None, result: EvalResult) -> None:
     if not fingerprint:
         return
     state = load_state(settings)
-    state["baseline_cache"] = {
+    cache = _baseline_cache(state)
+    cache[model] = {
         "fingerprint": fingerprint,
         "passed": result.passed,
         "total": result.total,
         "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    state["baseline_cache"] = cache
     save_state(settings, state)
 
 
@@ -686,11 +716,11 @@ def _progress(task_id: str, ok: bool, note: str) -> None:
 
 def rollback(settings: Settings, client: OllamaClient) -> None:
     previous = settings.models_dir / "valta.previous.Modelfile"
+    state = load_state(settings)
+    if state.get("personal_model") == settings.self_model:
+        raise RuntimeError(f"The personal model is already the base model, {settings.self_model}.")
     if not previous.exists():
         # The first promotion has nothing before it but the base model, so go back to that.
-        state = load_state(settings)
-        if state.get("personal_model") == settings.self_model:
-            raise RuntimeError(f"The personal model is already the base model, {settings.self_model}.")
         state["personal_model"] = settings.self_model
         save_state(settings, state)
         print(f"Personal model is back to the base model, {settings.self_model}. The `valta` model is kept in Ollama.")

@@ -131,35 +131,95 @@ def test_training_runs_resume_from_their_newest_checkpoint(tmp_path: Path):
 
 
 class _Ollama:
-    def __init__(self, digest):
+    def __init__(self, digest, base_name="qwen2.5-coder:3b", base_digest="sha256:base"):
         self.digest = digest
+        self.base_name = base_name
+        self.base_digest = base_digest
 
     def tags(self, host):
-        return [{"name": "valta:latest", "digest": self.digest}]
+        return [
+            {"name": "valta:latest", "digest": self.digest},
+            {"name": self.base_name, "digest": self.base_digest},
+        ]
 
 
-def test_baseline_score_is_reused_until_the_model_changes(tmp_path: Path, monkeypatch):
+def _scored(monkeypatch, scores: dict[str, int]) -> list[str]:
+    """Replace the eval with fixed scores out of 12. Returns the models it was asked to score, in order."""
     import valta.train as train
-    from valta.config import save_state
 
-    settings = _settings(tmp_path)
-    save_state(settings, {"personal_model": "valta"})
     runs = []
 
     def fake_eval(settings, client, host, model, on_progress=None):
         runs.append(model)
-        return EvalResult(model, passed=9, total=12)
+        return EvalResult(model, passed=scores[model], total=12)
 
     monkeypatch.setattr(train, "run_eval", fake_eval)
-    first = train.score_baseline(settings, _Ollama("sha256:aaa"))
-    second = train.score_baseline(settings, _Ollama("sha256:aaa"))
+    return runs
+
+
+def test_baseline_score_is_reused_until_the_model_changes(tmp_path: Path, monkeypatch):
+    import valta.train as train
+
+    settings = _settings(tmp_path)
+    runs = _scored(monkeypatch, {"valta": 9})
+    first = train.score_model(settings, _Ollama("sha256:aaa"), "valta")
+    second = train.score_model(settings, _Ollama("sha256:aaa"), "valta")
     assert runs == ["valta"] and (second.passed, second.total) == (9, 12) and first.score == second.score
-    train.score_baseline(settings, _Ollama("sha256:bbb"))  # new weights: score again
+    train.score_model(settings, _Ollama("sha256:bbb"), "valta")  # new weights: score again
     assert runs == ["valta", "valta"]
     train.remember_baseline(settings, _Ollama("sha256:ccc"), "valta", EvalResult("valta-candidate", 11, 12))
-    reused = train.score_baseline(settings, _Ollama("sha256:ccc"))
+    reused = train.score_model(settings, _Ollama("sha256:ccc"), "valta")
     assert runs == ["valta", "valta"] and reused.passed == 11
-    assert load_state(settings)["baseline_cache"]["fingerprint"].startswith("valta|sha256:ccc|")
+    assert load_state(settings)["baseline_cache"]["valta"]["fingerprint"].startswith("valta|sha256:ccc|")
+
+
+def test_a_fine_tune_has_to_reach_the_base_model_too(tmp_path: Path, monkeypatch):
+    """A worse fine-tune that got promoted must not become the bar the next one only has to tie."""
+    import valta.train as train
+    from valta.config import save_state
+    from valta.evals import should_promote
+
+    settings = _settings(tmp_path)
+    save_state(settings, {"personal_model": "valta"})
+    scores = {"valta": 9, settings.self_model: 10}
+    runs = _scored(monkeypatch, scores)
+    client = _Ollama("sha256:aaa", base_name=settings.self_model)
+
+    bar = train.score_baseline(settings, client)
+    assert (bar.model, bar.passed) == (settings.self_model, 10)
+    assert not should_promote(bar, EvalResult("valta-candidate", 9, 12), 0.0)[0]  # ties valta, loses to the base
+    assert should_promote(bar, EvalResult("valta-candidate", 10, 12), 0.0)[0]
+
+    train.score_baseline(settings, client)  # nothing changed: both scores come from the cache
+    assert runs == ["valta", settings.self_model]
+
+    scores["valta"] = 11  # new valta weights that beat the base: valta is the bar again
+    bar = train.score_baseline(settings, _Ollama("sha256:bbb", base_name=settings.self_model))
+    assert (bar.model, bar.passed) == ("valta", 11)
+    assert runs == ["valta", settings.self_model, "valta"]
+
+
+def test_the_base_model_is_scored_once_when_it_is_the_personal_model(tmp_path: Path, monkeypatch):
+    import valta.train as train
+    from valta.config import save_state
+
+    settings = _settings(tmp_path)
+    save_state(settings, {"personal_model": settings.self_model})
+    runs = _scored(monkeypatch, {settings.self_model: 10})
+    bar = train.score_baseline(settings, _Ollama("sha256:aaa", base_name=settings.self_model))
+    assert runs == [settings.self_model] and bar.passed == 10
+
+
+def test_a_score_saved_by_an_older_version_is_still_reused(tmp_path: Path, monkeypatch):
+    import valta.train as train
+    from valta.config import save_state
+
+    settings = _settings(tmp_path)
+    client = _Ollama("sha256:aaa")
+    old = {"fingerprint": train.baseline_fingerprint(settings, client, "valta"), "passed": 9, "total": 12, "time": "t"}
+    save_state(settings, {"personal_model": "valta", "baseline_cache": old})
+    runs = _scored(monkeypatch, {"valta": 0})
+    assert train.score_model(settings, client, "valta").passed == 9 and runs == []
 
 
 def test_max_examples_trims_imported_pairs_first(tmp_path: Path):

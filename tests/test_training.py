@@ -79,6 +79,19 @@ def test_dataset_is_cumulative_deduplicated_and_free_of_eval_prompts(tmp_path: P
     assert first in ids
 
 
+def test_learning_rate_comes_from_config_with_a_gentle_default(tmp_path: Path):
+    assert _settings(tmp_path).train_learning_rate == 1e-4
+    (tmp_path / "config.toml").write_text(
+        (tmp_path / "config.toml").read_text(encoding="utf-8").replace("train_learning_rate = 1e-4", "train_learning_rate = 5e-5"),
+        encoding="utf-8",
+    )
+    assert load_settings(tmp_path).train_learning_rate == 5e-5
+    without = "\n".join(line for line in (tmp_path / "config.toml").read_text(encoding="utf-8").splitlines()
+                        if not line.startswith("train_learning_rate"))
+    (tmp_path / "config.toml").write_text(without, encoding="utf-8")
+    assert load_settings(tmp_path).train_learning_rate == 1e-4
+
+
 def test_a_bare_no_is_not_a_correction(tmp_path: Path):
     settings = _settings(tmp_path)
     memory = Memory(settings)
@@ -284,3 +297,25 @@ def test_rollback_after_the_first_promotion_returns_to_the_base_model(tmp_path: 
     assert load_state(settings)["personal_model"] == settings.self_model
     with pytest.raises(RuntimeError):
         rollback(settings, _NoCreate())
+
+
+def test_a_promotion_over_the_base_model_rolls_back_to_the_base_model(tmp_path: Path):
+    """After going back to the base model, the old `valta` must not become the rollback target."""
+    from valta.config import load_state, save_state
+    from valta.train import rollback, write_modelfile
+
+    settings = _settings(tmp_path)
+    settings.models_dir.mkdir(parents=True, exist_ok=True)
+    (settings.models_dir / "valta.Modelfile").write_text("FROM old-bad.gguf\n", encoding="utf-8")
+    (settings.models_dir / "valta.previous.Modelfile").write_text("FROM older-bad.gguf\n", encoding="utf-8")
+    save_state(settings, {"personal_model": settings.self_model})
+    write_modelfile(settings, tmp_path / "new.gguf")
+    assert not (settings.models_dir / "valta.previous.Modelfile").exists()
+    save_state(settings, {**load_state(settings), "personal_model": "valta"})  # what create_valta does
+    rollback(settings, None)  # nothing to create: straight back to the base model
+    assert load_state(settings)["personal_model"] == settings.self_model
+
+    # A promotion over a promoted `valta` keeps that one as the rollback target.
+    save_state(settings, {**load_state(settings), "personal_model": "valta"})
+    write_modelfile(settings, tmp_path / "newer.gguf")
+    assert "new.gguf" in (settings.models_dir / "valta.previous.Modelfile").read_text(encoding="utf-8")

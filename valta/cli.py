@@ -52,9 +52,13 @@ app.add_typer(dataset_app, name="dataset")
 
 def _open_ui() -> None:
     settings, memory, tools, client = _stack()
+    from valta.chat import save_pending_facts
     from valta.ui import ValtaApp
 
-    ValtaApp(settings, memory, tools, client).run()
+    try:
+        ValtaApp(settings, memory, tools, client).run()
+    finally:
+        save_pending_facts()
 
 
 def _stack(project: Path | None = None):
@@ -247,7 +251,7 @@ def dataset_peek(
     split: str = typer.Option("train", "--split"),
     count: int = typer.Option(5, "--count", "-n"),
 ):
-    """Show the first few records' language, labels and question, to choose import filters."""
+    """Show the first few records' columns, language, labels and question, to choose import filters."""
     try:
         for row in peek_dataset(name, config, split, count):
             typer.echo(json.dumps(row, ensure_ascii=False, indent=2))
@@ -260,7 +264,12 @@ def dataset_import(
     name: str = typer.Argument(..., help="Hugging Face dataset, e.g. BAAI/Infinity-Instruct."),
     config: str = typer.Option(None, "--config", "-c", help="Subset, e.g. 7M or Gen."),
     split: str = typer.Option("train", "--split"),
-    lang: str = typer.Option("en", "--lang", help="Keep records whose langdetect matches. Empty keeps all."),
+    lang: str = typer.Option(
+        "en",
+        "--lang",
+        help="Keep records whose langdetect matches. Without that field, en keeps prose that looks English "
+        "and other languages keep everything. Empty keeps all.",
+    ),
     ability: list[str] = typer.Option(
         [], "--ability", "-a", help="Keep records whose labels contain this word, e.g. code. Repeatable."
     ),
@@ -270,8 +279,17 @@ def dataset_import(
         0, "--min-answer", help="Skip conversations whose final answer is shorter than this many characters."
     ),
     code_only: bool = typer.Option(False, "--code-only", help="Keep only conversations whose final answer has code."),
+    where: list[str] = typer.Option(
+        [],
+        "--where",
+        help="COLUMN=TEXT: keep records whose COLUMN contains TEXT, e.g. lang=python or source=wildchat. "
+        "Repeatable; a record that matches any of them is kept.",
+    ),
 ):
     """Stream a dataset, keep conversations that pass the filters, and store them for `valta train`."""
+    bad = [condition for condition in where if "=" not in condition or not condition.partition("=")[0].strip()]
+    if bad:
+        raise typer.BadParameter(f"--where takes COLUMN=TEXT, not {bad[0]!r}.")
     settings = load_settings()
     memory = Memory(settings)
     typer.echo(f"Streaming {name}{f' ({config})' if config else ''}. Nothing is downloaded in full.")
@@ -293,6 +311,7 @@ def dataset_import(
             on_progress=progress,
             min_answer=min_answer,
             code_only=code_only,
+            where=where,
         )
     except DatasetAccessError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -471,7 +490,7 @@ def train(
         help="Train only this many steps in a scratch folder and report speed and GPU memory. Keeps nothing.",
     ),
 ):
-    """Fine-tune the 3B on the GTX 1660, score it, and replace `valta` only if it did not get worse."""
+    """Fine-tune the 3B on the GTX 1660, score it, and replace `valta` only if it matches both the current model and the base 3B."""
     settings, memory, _tools, client = _stack()
     if rollback_model:
         try:
@@ -496,7 +515,7 @@ def train(
 
 
 def _train(settings, memory, client, skip_eval: bool = False, max_examples: int = 0) -> None:
-    """Build pairs, fine-tune, score, and promote only if the new model did not get worse."""
+    """Build pairs, fine-tune, score, and promote only if the new model reaches the bar from score_baseline."""
     if not skip_eval and not client.healthy(settings.self_host):
         raise typer.BadParameter(
             "The GTX 1660 server is down. It is needed to score the new model. "
