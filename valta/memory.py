@@ -99,6 +99,14 @@ class Memory:
               source TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS external_examples (
+              id TEXT PRIMARY KEY,
+              dataset TEXT NOT NULL,
+              record_id TEXT NOT NULL,
+              messages TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE (dataset, record_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_records_kind ON records(kind, created_at);
             """
         )
@@ -355,6 +363,41 @@ class Memory:
 
     def all_preferences(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM preference_pairs ORDER BY created_at").fetchall()
+
+    def add_external(self, dataset: str, record_id: str, messages: list[dict]) -> bool:
+        """One conversation from a public dataset. Kept apart from your own examples: it does not count
+        toward train_threshold. Returns False when that record was already imported."""
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                INSERT OR IGNORE INTO external_examples (id, dataset, record_id, messages, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (uuid.uuid4().hex, dataset, record_id, json.dumps(messages, ensure_ascii=False), _now()),
+            )
+            self.conn.commit()
+        return cursor.rowcount > 0
+
+    def external_sample(self, limit: int) -> list[list[dict]]:
+        """Up to `limit` imported conversations. Ids are random, so ordering by id is a stable random sample."""
+        if limit <= 0:
+            return []
+        rows = self.conn.execute(
+            "SELECT messages FROM external_examples ORDER BY id LIMIT ?", (limit,)
+        ).fetchall()
+        return [json.loads(row["messages"]) for row in rows]
+
+    def external_counts(self) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT dataset, COUNT(*) AS n FROM external_examples GROUP BY dataset ORDER BY dataset"
+        ).fetchall()
+        return {row["dataset"]: int(row["n"]) for row in rows}
+
+    def remove_external(self, dataset: str) -> int:
+        with self._lock:
+            cursor = self.conn.execute("DELETE FROM external_examples WHERE dataset = ?", (dataset,))
+            self.conn.commit()
+        return cursor.rowcount
 
     def enqueue_topic(self, topic: str, source: str = "") -> None:
         cleaned = " ".join(topic.split())

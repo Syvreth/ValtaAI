@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ import typer
 
 from valta.config import load_settings
 from valta.engineer import run_goal
+from valta.external import DatasetAccessError, import_dataset, peek_dataset
 from valta.ingest import ingest_path
 from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
@@ -39,6 +41,8 @@ from valta.vectors import Vectors
 app = typer.Typer(help="Valta, a companion that grows.", invoke_without_command=True)
 models_app = typer.Typer(help="Ollama models.")
 app.add_typer(models_app, name="models")
+dataset_app = typer.Typer(help="Public datasets to mix into fine-tuning.")
+app.add_typer(dataset_app, name="dataset")
 
 
 def _open_ui() -> None:
@@ -202,6 +206,80 @@ def models_pull():
         client.pull(settings.self_host, settings.self_model)
     else:
         typer.echo("The GTX 1660 server is down, so the 3B was not pulled.")
+
+
+@dataset_app.command("peek")
+def dataset_peek(
+    name: str = typer.Argument(..., help="Hugging Face dataset, e.g. BAAI/Infinity-Instruct."),
+    config: str = typer.Option(None, "--config", "-c", help="Subset, e.g. 7M or Gen."),
+    split: str = typer.Option("train", "--split"),
+    count: int = typer.Option(5, "--count", "-n"),
+):
+    """Show the first few records' language, labels and question, to choose import filters."""
+    try:
+        for row in peek_dataset(name, config, split, count):
+            typer.echo(json.dumps(row, ensure_ascii=False, indent=2))
+    except DatasetAccessError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@dataset_app.command("import")
+def dataset_import(
+    name: str = typer.Argument(..., help="Hugging Face dataset, e.g. BAAI/Infinity-Instruct."),
+    config: str = typer.Option(None, "--config", "-c", help="Subset, e.g. 7M or Gen."),
+    split: str = typer.Option("train", "--split"),
+    lang: str = typer.Option("en", "--lang", help="Keep records whose langdetect matches. Empty keeps all."),
+    ability: list[str] = typer.Option(
+        [], "--ability", "-a", help="Keep records whose labels contain this word, e.g. code. Repeatable."
+    ),
+    limit: int = typer.Option(2000, "--limit", help="Stop after keeping this many."),
+    scan: int = typer.Option(200000, "--scan", help="Stop after reading this many, kept or not."),
+):
+    """Stream a dataset, keep conversations that pass the filters, and store them for `valta train`."""
+    settings = load_settings()
+    memory = Memory(settings)
+    typer.echo(f"Streaming {name}{f' ({config})' if config else ''}. Nothing is downloaded in full.")
+
+    def progress(stats) -> None:
+        typer.echo(f"  read {stats.seen}, kept {stats.kept}")
+
+    try:
+        stats = import_dataset(
+            settings, memory, name, config, split, lang or None, ability, limit, scan, on_progress=progress
+        )
+    except DatasetAccessError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except KeyboardInterrupt:
+        typer.echo("Stopped. What was kept so far is saved.")
+        return
+    typer.echo(stats.summary())
+    total = sum(memory.external_counts().values())
+    typer.echo(
+        f"{total} imported conversation(s) stored. Each fine-tune mixes in at most "
+        f"{settings.external_max_pairs} (external_max_pairs in config.toml)."
+    )
+
+
+@dataset_app.command("list")
+def dataset_list():
+    """How many conversations are stored from each imported dataset."""
+    settings = load_settings()
+    counts = Memory(settings).external_counts()
+    if not counts:
+        typer.echo("No datasets imported. Try: valta dataset import BAAI/Infinity-Instruct --config 7M --ability code")
+        return
+    for dataset, count in counts.items():
+        typer.echo(f"{count:>8}  {dataset}")
+    typer.echo(f"Each fine-tune mixes in at most {settings.external_max_pairs}.")
+
+
+@dataset_app.command("remove")
+def dataset_remove(name: str = typer.Argument(..., help="The name shown by `valta dataset list`.")):
+    """Delete every stored conversation from one imported dataset."""
+    removed = Memory(load_settings()).remove_external(name)
+    if not removed:
+        raise typer.BadParameter(f"Nothing is stored under {name}. See `valta dataset list`.")
+    typer.echo(f"Removed {removed} conversation(s) from {name}.")
 
 
 @app.command("eval")

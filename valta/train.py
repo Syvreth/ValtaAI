@@ -63,6 +63,21 @@ def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None 
     for title, text in research_pairs(memory.recent(limit=200, kind="research")):
         add(f"What did you learn about {title}?", text)
 
+    external = 0
+    for messages in memory.external_sample(settings.external_max_pairs):
+        key = (json.dumps(messages, ensure_ascii=False), "")
+        user_turns = [message["content"] for message in messages if message["role"] == "user"]
+        if key in seen:
+            continue
+        if any(conflicts_with_rules(message["content"]) for message in messages) or any(
+            contaminated(text, blocked) for text in user_turns
+        ):
+            dropped += 1
+            continue
+        seen.add(key)
+        pairs.append({"messages": [{"role": "system", "content": rules}, *messages]})
+        external += 1
+
     if client and client.healthy(settings.heavy_host):
         for record in memory.recent(limit=20, kind="book"):
             drafted = _qa_from_passage(settings, client, record.text)
@@ -79,7 +94,8 @@ def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None 
         for pair in pairs:
             handle.write(json.dumps(pair, ensure_ascii=False) + "\n")
     note = f" ({dropped} dropped for rule conflicts or eval overlap)" if dropped else ""
-    print(f"Wrote {len(pairs)} training pairs to {path}{note}")
+    from_datasets = f", {external} of them from imported datasets" if external else ""
+    print(f"Wrote {len(pairs)} training pairs to {path}{from_datasets}{note}")
     return path, example_ids
 
 

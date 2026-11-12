@@ -33,6 +33,7 @@ class Settings:
     train_max_len: int = 1024
     eval_tolerance: float = 0.0
     ui_theme: str = "tokyo-night"
+    external_max_pairs: int = 2000
 
     @property
     def data(self) -> Path:
@@ -127,6 +128,7 @@ def load_settings(root: Path | None = None) -> Settings:
         train_max_len=int(raw.get("train_max_len", 1024)),
         eval_tolerance=float(raw.get("eval_tolerance", 0.0)),
         ui_theme=str(raw.get("ui_theme", "tokyo-night")),
+        external_max_pairs=int(raw.get("external_max_pairs", 2000)),
     )
     settings.ensure_dirs()
     return settings

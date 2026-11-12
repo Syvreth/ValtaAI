@@ -184,6 +184,25 @@ Two more are logged for later kinds of training, and are not used by `valta trai
 
 Every fine-tune starts again from the base model, so each run trains on all examples ever saved, not only the new ones. Training uses the model's own chat template and learns only from the answer. The root rules at the top of each pair are masked out. Examples longer than `train_max_len` tokens are skipped instead of cut.
 
+## Public datasets
+
+A public instruction dataset on Hugging Face can be mixed in, for example [BAAI/Infinity-Instruct](https://huggingface.co/datasets/BAAI/Infinity-Instruct). It is streamed, so only the records read are downloaded, and only the ones that pass the filters are kept.
+
+```powershell
+.\.venv\Scripts\hf.exe auth login                                            # once, for gated datasets
+.\.venv\Scripts\valta.exe dataset peek BAAI/Infinity-Instruct --config 7M -n 5
+.\.venv\Scripts\valta.exe dataset import BAAI/Infinity-Instruct --config 7M --ability code --limit 2000
+.\.venv\Scripts\valta.exe dataset list
+.\.venv\Scripts\valta.exe dataset remove BAAI/Infinity-Instruct:7M
+```
+
+- Gated datasets (Infinity-Instruct is one) need you to log in on the dataset page, accept its conditions, and sign in here with your own token.
+- `peek` shows each record's language, labels and first question, so you can pick `--ability` words. `--ability` matches any word in the record's labels and can be repeated. `--lang` defaults to `en`. `--scan` caps how many records are read.
+- Conversations are converted to user and assistant turns, and the dataset's own system prompts are dropped, because the root rules are the system message of every pair. Training learns from the last answer. Records longer than `train_max_len`, that overlap an eval task, or that conflict with the root rules are skipped.
+- They are stored apart from your own examples, in the `external_examples` table, and do not count toward `train_threshold`. Each fine-tune mixes in at most `external_max_pairs` (default 2000).
+- Check the dataset's license and the licenses of what it was built from before training on it. Infinity-Instruct is CC BY-SA 4.0 with its own conditions, and draws on other datasets with their own terms.
+- A 6 GB card trains a few thousand examples in a night, not millions. Qwen2.5-Coder-3B-Instruct was already instruction-tuned on data like this, so expect small gains from a narrow, relevant slice. The eval gate still decides whether the result replaces `valta`.
+
 ## Practice
 
 `valta practice` is how it improves without you in the loop. For each problem:

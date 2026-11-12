@@ -27,5 +27,9 @@ train_max_len = 1024
 # 0 means it must match or beat the current score. With 12 eval tasks, 0.1 lets a model that lost a task through.
 eval_tolerance = 0.0
 
+# Most conversations from imported datasets (`valta dataset import`) mixed into one fine-tune.
+# Keeps a large public dataset from drowning out your corrections and verified work. 0 leaves them out.
+external_max_pairs = 2000
+
 # Terminal colors. Any Textual theme: tokyo-night, nord, gruvbox, dracula, catppuccin-mocha, textual-dark, textual-light...
 ui_theme = "tokyo-night"

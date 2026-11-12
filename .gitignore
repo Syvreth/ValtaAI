@@ -31,7 +31,7 @@ secrets.json
 secret.json
 *.secret
 id_rsa
-id_ed25519
+id_ed2551
 
 # Private constitution. The public starter is rules/root.example.md.
 rules/root.md
@@ -53,6 +53,7 @@ data/datasets/
 data/releases/
 data/state.json
 data/library/*
+data/interests.txt
 !data/library/.gitkeep
 
 # Books dropped into the tree, and model weights.
