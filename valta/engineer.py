@@ -68,6 +68,11 @@ class Action:
     new: str = ""
 
 
+_ACTIONS = {
+    "read_file", "list_directory", "search_memory", "replace", "write_file", "run_tests", "done", "ingest", "research", "work"
+}
+
+
 def parse_action(text: str) -> Action | None:
     marker = "ACTION "
     start = text.rfind(marker)
@@ -76,9 +81,7 @@ def parse_action(text: str) -> Action | None:
     body = text[start + len(marker) :]
     name, _, rest = body.partition("\n")
     name = name.strip().lower()
-    if name not in {
-        "read_file", "list_directory", "search_memory", "replace", "write_file", "run_tests", "done", "ingest", "research", "work"
-    }:
+    if name not in _ACTIONS:
         return None
     if name == "done":
         return Action(name="done", summary=_section(rest, "SUMMARY"))

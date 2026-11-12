@@ -1,7 +1,9 @@
 # Start Ollama for Valta. Both modes share one model folder.
 #
 # -Mode separate (default): two servers.
-#   Port 11434: Vulkan on the RX 6600 (teacher and embeddings). CUDA is hidden.
+#   Port 11434: Vulkan on the RX 6600 only (teacher and embeddings). CUDA is hidden, and Vulkan is limited
+#   to device 0, the RX 6600; Vulkan also sees the GTX 1660, and would put a model too big for the RX 6600
+#   partly on it, under a training run. Check data\logs\ollama-rx6600.err.log for "using device Vulkan0".
 #   Port 11435: CUDA on the GTX 1660 (personal model). Vulkan is off.
 #
 # -Mode combined: one server on port 11434 that sees both cards through Vulkan and
@@ -110,6 +112,7 @@ if (Test-PortOpen 11434) {
     Start-OllamaServer "rx6600" 11434 @{
         CUDA_VISIBLE_DEVICES = "-1"
         OLLAMA_VULKAN = "1"
+        GGML_VK_VISIBLE_DEVICES = "0"
     }
 }
 
