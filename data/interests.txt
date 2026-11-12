@@ -1,4 +1,31 @@
 # One research topic per line. Lines starting with # are ignored.
 local software
-python
+python coding language
+rust coding language
+php server side scripting
+MongoDB - Document database
+PostgreSQL - Advanced SQL database
+MySQL - Popular database
+SQLite - Embedded database
+Git - Version control
+GitHub Actions - CI/CD platform
+GitLab CI - GitLab CI/CD
+Jenkins - Automation server
+CircleCI - CI platform
+Azure Pipelines - CI/CD service
+node.js javascript runtime
+express web framework
+nestjs progressive framework
+html markup language
+basic hacking
+discord.js
+mcp servers
+self-learning ai
+React UI Library
+Vue Progressive Framework
+Svelte Enchanced web apps
+NextJS React Framework
+Nuxt Vue.js framework
+CSS Style Sheets
+Tailwin Utility first css
 building software projects
