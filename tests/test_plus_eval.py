@@ -101,6 +101,7 @@ def test_run_plus_asks_at_temperature_zero_and_keeps_results_apart(tmp_path: Pat
     assert result.folder.parent == settings.evalplus_dir
     history = plus_history(settings, "humaneval")
     assert len(history) == 1 and history[0]["model"] == "qwen:7b" and history[0]["plus"] == 1
+    assert history[0]["options"] == settings.model_options  # the sampling options the score was taken with
     assert plus_history(settings, "mbpp") == []
     assert not settings.state_path.exists()  # the twelve-task history in state.json is left alone
 

@@ -36,6 +36,18 @@ def test_chat_turns_thinking_off_and_returns_only_the_answer(monkeypatch):
     assert sent[0]["options"] == {"num_ctx": 8192, "temperature": 0.4}
 
 
+def test_model_options_from_config_go_with_every_call(monkeypatch):
+    from types import SimpleNamespace
+
+    sent = _serve(monkeypatch, _Response(message={"content": "ok"}), _Response(message={"content": "", "tool_calls": [{}]}))
+    settings = SimpleNamespace(model_options={"presence_penalty": 0.0, "temperature": 9})
+    client = OllamaClient(settings=settings)
+    client.chat("http://h", "m", [], 8192, temperature=0.0)
+    client.chat_with_tools("http://h", "m", [], 4096, tools=[])
+    assert sent[0]["options"] == {"presence_penalty": 0.0, "temperature": 0.0, "num_ctx": 8192}
+    assert sent[1]["options"] == {"presence_penalty": 0.0, "temperature": 0.4, "num_ctx": 4096}
+
+
 def test_a_reply_that_only_thought_is_a_failure(monkeypatch):
     _serve(monkeypatch, _Response(message={"content": "", "thinking": "Let me consider..."}))
     with pytest.raises(OllamaError, match="only thought"):

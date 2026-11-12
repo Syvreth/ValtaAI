@@ -104,6 +104,8 @@ The 7B stays the model that researches and writes code. The 3B is the one that c
 
 Hosts, context length, research limits, and the training threshold live in `config.toml`.
 
+`model_options` in `config.toml` is sent with every model call, under the call's own context size and temperature. It sets `presence_penalty = 0.0`: Qwen3.5 ships with 1.5, which pushes the model away from tokens it has just used, and code reuses names and symbols all the time. Qwen2.5 ships with no penalty, so the setting changes nothing for it.
+
 ### Both cards for one model (combined mode)
 
 Through Vulkan, one Ollama server can see the RX 6600 and the GTX 1660 together, about 14 GB, and spread a model across them. That fits a teacher neither card holds alone, such as `qwen2.5-coder:14b` (about 9 GB at 4-bit).

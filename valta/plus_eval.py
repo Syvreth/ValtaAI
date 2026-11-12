@@ -184,6 +184,7 @@ def _record(settings: Settings, host: str, result: PlusResult) -> None:
         "total": result.total,
         "base": result.base_passed,
         "plus": result.plus_passed,
+        "options": settings.model_options,
         "folder": result.folder.name if result.folder else None,
     }
     with (settings.evalplus_dir / "history.jsonl").open("a", encoding="utf-8") as handle:

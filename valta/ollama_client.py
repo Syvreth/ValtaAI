@@ -58,7 +58,7 @@ class OllamaClient:
                 "messages": messages,
                 "stream": False,
                 "think": False,
-                "options": {"num_ctx": num_ctx, "temperature": temperature},
+                "options": self._options(num_ctx, temperature),
             },
         )
         content = strip_thinking(message.get("content") or "")
@@ -86,7 +86,7 @@ class OllamaClient:
                 "tools": tools,
                 "stream": False,
                 "think": False,
-                "options": {"num_ctx": num_ctx, "temperature": temperature},
+                "options": self._options(num_ctx, temperature),
             },
         )
         content = strip_thinking(message.get("content") or "")
@@ -94,6 +94,11 @@ class OllamaClient:
         if not content.strip() and not calls:
             raise OllamaError(f"{host} returned neither text nor a tool call from {model}")
         return {"role": "assistant", "content": content, "tool_calls": calls}
+
+    def _options(self, num_ctx: int, temperature: float) -> dict[str, Any]:
+        """config.toml's model_options, then this call's context size and temperature."""
+        extra = dict(getattr(self.settings, "model_options", None) or {})
+        return {**extra, "num_ctx": num_ctx, "temperature": temperature}
 
     def _chat_message(self, host: str, body: dict[str, Any]) -> dict[str, Any]:
         try:

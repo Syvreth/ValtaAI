@@ -400,7 +400,8 @@ def _eval_plus(settings, client, model: str, dataset: str, personal: bool) -> No
         for row in earlier:
             total = row.get("total") or 0
             share = f"{row.get('plus', 0) / total:.1%}" if total else "-"
-            typer.echo(f"  {str(row.get('time', ''))[:16]}  {row.get('model')}  {row.get('plus')}/{total} ({share})")
+            options = "  " + json.dumps(row["options"]) if row.get("options") else ""
+            typer.echo(f"  {str(row.get('time', ''))[:16]}  {row.get('model')}  {row.get('plus')}/{total} ({share}){options}")
 
 
 @app.command()

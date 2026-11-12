@@ -23,6 +23,10 @@ repair_rounds = 2
 # true: the coder calls its tools through Ollama's tool calling. false: it writes ACTION blocks that Valta parses,
 # which suits models that are weak at tool calling, such as Qwen2.5-Coder. Valta reads an ACTION block either way.
 native_tools = false
+# Sent with every model call, under the call's own context size and temperature. Qwen3.5 ships with
+# presence_penalty 1.5, which pushes the model away from tokens it has just used; code reuses names and symbols
+# all the time, so it is turned off here. Qwen2.5 ships with no penalty, so this changes nothing for it.
+model_options = { presence_penalty = 0.0 }
 
 extra_models = []
 

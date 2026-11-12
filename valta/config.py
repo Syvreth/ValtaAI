@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -39,6 +39,7 @@ class Settings:
     train_fp32_embeddings: bool = False
     train_gradient_checkpointing: bool = True
     native_tools: bool = False
+    model_options: dict = field(default_factory=dict)
 
     @property
     def data(self) -> Path:
@@ -143,6 +144,7 @@ def load_settings(root: Path | None = None) -> Settings:
         train_fp32_embeddings=bool(raw.get("train_fp32_embeddings", False)),
         train_gradient_checkpointing=bool(raw.get("train_gradient_checkpointing", True)),
         native_tools=bool(raw.get("native_tools", False)),
+        model_options=dict(raw.get("model_options", {})),
     )
     settings.ensure_dirs()
     return settings
