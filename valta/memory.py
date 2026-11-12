@@ -73,7 +73,8 @@ class Memory:
               assistant_text TEXT NOT NULL,
               source_id TEXT,
               created_at TEXT NOT NULL,
-              used INTEGER NOT NULL DEFAULT 0
+              used INTEGER NOT NULL DEFAULT 0,
+              meta TEXT
             );
             CREATE TABLE IF NOT EXISTS topics (
               id TEXT PRIMARY KEY,
@@ -110,6 +111,10 @@ class Memory:
             CREATE INDEX IF NOT EXISTS idx_records_kind ON records(kind, created_at);
             """
         )
+        # Databases made before examples carried `meta` (such as a practice problem's tests) get the column.
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(training_examples)")}
+        if "meta" not in columns:
+            self.conn.execute("ALTER TABLE training_examples ADD COLUMN meta TEXT")
         self.conn.commit()
 
     def close(self) -> None:
@@ -268,15 +273,20 @@ class Memory:
                 )
                 self.conn.commit()
 
-    def add_example(self, user_text: str, assistant_text: str, source_id: str | None = None) -> str:
+    def add_example(
+        self, user_text: str, assistant_text: str, source_id: str | None = None, meta: dict | None = None
+    ) -> str:
+        """`meta` is kept as JSON beside the example: for a practice problem, the tests that check any answer to it,
+        which preference and reinforcement training need and supervised training does not."""
         example_id = uuid.uuid4().hex
         with self._lock:
             self.conn.execute(
                 """
-                INSERT INTO training_examples (id, user_text, assistant_text, source_id, created_at, used)
-                VALUES (?, ?, ?, ?, ?, 0)
+                INSERT INTO training_examples (id, user_text, assistant_text, source_id, created_at, used, meta)
+                VALUES (?, ?, ?, ?, ?, 0, ?)
                 """,
-                (example_id, user_text, assistant_text, source_id, _now()),
+                (example_id, user_text, assistant_text, source_id, _now(),
+                 json.dumps(meta, ensure_ascii=False) if meta is not None else None),
             )
             self.conn.commit()
         return example_id

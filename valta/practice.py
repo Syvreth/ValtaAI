@@ -296,6 +296,7 @@ class Practice:
             return Outcome("rejected", problem.name, "the solution is too long to train on")
 
         note = "verified"
+        student_passed: bool | None = None
         if self.student_model:
             try:
                 _, student_passed, _ = attempt(
@@ -311,13 +312,23 @@ class Practice:
                 self.student_model = None
                 self.stats.notes.append("The personal model stopped answering, so later problems are saved unchecked.")
                 note = "verified, personal model not checked"
+                student_passed = None
             else:
                 if student_passed and not self.keep_known:
                     return Outcome("known", problem.name, "the personal model already solves it")
                 note = "verified, the personal model already solves it" if student_passed else "verified, the personal model fails it"
         if self.memory.example_exists(problem.user_text, answer):
             return Outcome("rejected", problem.name, "already saved")
-        self.memory.add_example(problem.user_text, answer, source_id=SOURCE)
+        meta = {
+            "name": problem.name,
+            "tests": problem.tests,  # any answer can be checked against these: what reinforcement training needs
+            "topic": topic,
+            "level": level,
+            "teacher": self.settings.teacher_model,
+            "student": self.student_model,
+            "student_passed": student_passed,
+        }
+        self.memory.add_example(problem.user_text, answer, source_id=SOURCE, meta=meta)
         self.written.add(problem.name)
         return Outcome("saved", problem.name, note)
 

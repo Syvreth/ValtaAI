@@ -285,6 +285,8 @@ A public instruction dataset on Hugging Face can be mixed in, for example [BAAI/
 .\.venv\Scripts\valta.exe practice --count 30 --train
 ```
 
+`--keep-known` keeps every verified problem, including the ones the personal model already solves, which builds a dataset for training a bigger model later. Each practice example stores its tests, topic, difficulty, and whether the personal model passed, as JSON in the `meta` column of `training_examples`. Tests are what preference and reinforcement training need: they check any answer, not only the saved one. With `qwen3.6:35b` as the teacher, a problem takes about a minute and about two in three are kept; the rest fail the teacher's own tests and are dropped. Stop a run with Ctrl-C; everything saved so far stays.
+
 `--train` runs the normal fine-tune afterwards once enough examples are waiting, with the same eval gate. Run it overnight or from Task Scheduler and it keeps going without you. The teacher works on the RX 6600 and the check on the GTX 1660, so they do not fight over one card.
 
 What this can and cannot do:

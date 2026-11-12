@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -77,6 +79,27 @@ def test_a_verified_problem_the_student_fails_is_saved(tmp_path: Path):
     assert rows[0]["user_text"].startswith("Write rotate_left(")
     assert rows[0]["user_text"].endswith(REPLY_SUFFIX)
     assert rows[0]["assistant_text"] == GOOD
+    meta = json.loads(rows[0]["meta"])  # the tests travel with the example, for training that checks answers
+    assert meta["tests"] == TESTS and meta["name"] == "rotate_left"
+    assert meta["student"] == "valta" and meta["student_passed"] is False
+    assert meta["level"] in ("easy", "medium", "hard") and meta["topic"] and meta["teacher"]
+
+
+def test_an_older_database_gains_the_meta_column(tmp_path: Path):
+    settings = _settings(tmp_path)
+    settings.data.mkdir(parents=True, exist_ok=True)
+    old = sqlite3.connect(settings.db_path)
+    old.execute(
+        "CREATE TABLE training_examples (id TEXT PRIMARY KEY, user_text TEXT NOT NULL, assistant_text TEXT NOT NULL, "
+        "source_id TEXT, created_at TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0)"
+    )
+    old.execute("INSERT INTO training_examples VALUES ('a', 'q', 'a', 'chat', '2026-01-01', 0)")
+    old.commit()
+    old.close()
+    memory = Memory(settings)
+    memory.add_example("q2", "a2", source_id=SOURCE, meta={"tests": "assert True\n"})
+    rows = memory.all_examples()
+    assert rows[0]["meta"] is None and json.loads(rows[1]["meta"]) == {"tests": "assert True\n"}
 
 
 def test_a_problem_the_student_already_solves_teaches_nothing(tmp_path: Path):
@@ -86,7 +109,8 @@ def test_a_problem_the_student_already_solves_teaches_nothing(tmp_path: Path):
     (tmp_path / "again").mkdir()
     kept, memory, _models, _s = _session(tmp_path / "again", [problem_reply()], [GOOD], [GOOD], keep_known=True)
     assert kept.once().kind == "saved"
-    assert len(memory.all_examples()) == 1
+    rows = memory.all_examples()
+    assert len(rows) == 1 and json.loads(rows[0]["meta"])["student_passed"] is True
 
 
 def test_without_a_student_every_verified_problem_is_kept(tmp_path: Path):
