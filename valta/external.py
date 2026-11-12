@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -98,6 +99,14 @@ def matches_abilities(record: dict, abilities: list[str]) -> bool:
     return any(ability.lower() in word for ability in abilities for word in words)
 
 
+_CODE_LINE = re.compile(r"^\s*(?:def|class|import|from\s+\S+\s+import|function|const|let|#include|public|fn)\b", re.M)
+
+
+def has_code(text: str) -> bool:
+    """A fenced code block, or a line that starts like code in a common language."""
+    return "```" in text or bool(_CODE_LINE.search(text))
+
+
 def record_id(record: dict) -> str:
     raw = record.get("id")
     if raw not in (None, ""):
@@ -141,8 +150,14 @@ def import_dataset(
     scan_limit: int | None = None,
     records: Iterable[dict] | None = None,
     on_progress: Callable[[ImportStats], None] | None = None,
+    min_answer: int = 0,
+    code_only: bool = False,
 ) -> ImportStats:
-    """Keep up to `limit` conversations that pass the filters. `records` replaces streaming, for tests."""
+    """Keep up to `limit` conversations that pass the filters. `records` replaces streaming, for tests.
+
+    `min_answer` skips conversations whose final answer is shorter than that many characters, such as
+    one-line "describe this function" replies. `code_only` keeps only final answers that contain code.
+    """
     from valta.train import conflicts_with_rules
 
     source = records if records is not None else stream_dataset(name, config, split)
@@ -169,6 +184,13 @@ def import_dataset(
                 continue
             if sum(len(message["content"]) for message in messages) > max_chars:
                 stats.skip("too long")
+                continue
+            answer = messages[-1]["content"]
+            if min_answer and len(answer) < min_answer:
+                stats.skip("short answer")
+                continue
+            if code_only and not has_code(answer):
+                stats.skip("no code")
                 continue
             texts = [message["content"] for message in messages]
             if any(conflicts_with_rules(text) for text in texts):

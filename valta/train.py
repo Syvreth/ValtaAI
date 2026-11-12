@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -8,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from valta.config import Settings, load_state, save_state
-from valta.evals import EvalResult, contaminated, eval_prompts, run_eval, should_promote
+from valta.evals import EvalResult, contaminated, eval_prompts, load_tasks, run_eval, should_promote
 from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
 from valta.prompt import build_system, load_rules
@@ -30,7 +31,12 @@ def conflicts_with_rules(text: str) -> bool:
     return any(phrase in lowered for phrase in CONFLICT_PHRASES)
 
 
-def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None = None) -> tuple[Path, list[str]]:
+def build_pairs(
+    settings: Settings,
+    memory: Memory,
+    client: OllamaClient | None = None,
+    max_examples: int = 0,
+) -> tuple[Path, list[str]]:
     """Training text is question-answer pairs. Raw ebook text is not the corpus.
 
     Every fine-tune starts again from the base model, so the dataset is cumulative: all corrections and
@@ -64,7 +70,11 @@ def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None 
         add(f"What did you learn about {title}?", text)
 
     external = 0
-    for messages in memory.external_sample(settings.external_max_pairs):
+    external_limit = settings.external_max_pairs
+    if max_examples > 0:
+        # A smaller, faster run trims the imported dataset first; your own examples are always kept.
+        external_limit = min(external_limit, max(0, max_examples - len(pairs)))
+    for messages in memory.external_sample(external_limit):
         key = (json.dumps(messages, ensure_ascii=False), "")
         user_turns = [message["content"] for message in messages if message["role"] == "user"]
         if key in seen:
@@ -78,8 +88,8 @@ def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None 
         pairs.append({"messages": [{"role": "system", "content": rules}, *messages]})
         external += 1
 
-    if client and client.healthy(settings.heavy_host):
-        for record in memory.recent(limit=20, kind="book"):
+    if client and settings.doc_qa_pairs > 0 and client.healthy(settings.heavy_host):
+        for record in document_passages(memory, settings.doc_qa_pairs):
             drafted = _qa_from_passage(settings, client, record.text)
             if drafted:
                 add(drafted[0], drafted[1])
@@ -136,6 +146,17 @@ def research_pairs(records) -> list[tuple[str, str]]:
         if len(pairs) >= RESEARCH_MAX_PAIRS:
             break
     return pairs
+
+
+def document_passages(memory: Memory, limit: int):
+    """The newest passages from ingested books and learned web pages, at most `limit` in all.
+
+    Each becomes one question and answer written by the teacher at training time, so `limit`
+    (doc_qa_pairs) also sets how many teacher calls a run makes before training starts.
+    """
+    records = memory.recent(limit=limit, kind="book") + memory.recent(limit=limit, kind="web")
+    records.sort(key=lambda record: record.created_at, reverse=True)
+    return records[:limit]
 
 
 def _pair(rules: str, user_text: str, assistant_text: str) -> dict:
@@ -202,8 +223,31 @@ def tokenize_example(tokenizer, messages: list[dict], max_len: int) -> dict | No
     return {"input_ids": list(full_ids), "attention_mask": [1] * len(full_ids), "labels": labels}
 
 
-def run_qlora(settings: Settings, dataset_path: Path) -> Path:
-    """QLoRA on the GTX 1660. 4-bit NF4, batch size 1, fp16, short context."""
+TRAIN_SEED = 42
+RUN_DATASET = "dataset.jsonl"
+
+
+def run_qlora(
+    settings: Settings,
+    dataset_path: Path | None,
+    resume_dir: Path | None = None,
+    benchmark_steps: int = 0,
+) -> Path:
+    """QLoRA on the GTX 1660. 4-bit NF4, batch size 1, fp16, short context.
+
+    Progress is saved every `checkpoint_steps` optimizer steps. `resume_dir` continues an unfinished
+    run from its last checkpoint, on the exact dataset that run started with (kept in the run folder),
+    so an interrupted night of training is not lost.
+
+    `benchmark_steps` trains only that many steps in a scratch folder, prints seconds per step and
+    peak GPU memory, and keeps nothing, to measure a setting before committing a night to it.
+    """
+    if resume_dir is not None:
+        dataset_path = resume_dir / RUN_DATASET
+        if not dataset_path.is_file():
+            raise RuntimeError(f"{resume_dir} has no {RUN_DATASET}, so it cannot be resumed.")
+    if dataset_path is None:
+        raise RuntimeError("No training dataset was given.")
     try:
         import torch
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -213,6 +257,7 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
             BitsAndBytesConfig,
             DataCollatorForSeq2Seq,
             Trainer,
+            TrainerCallback,
             TrainingArguments,
         )
     except ImportError as exc:
@@ -271,7 +316,10 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
         torch_dtype=compute,
     )
     model.config.use_cache = False
-    model = prepare_model_for_kbit_training(model)
+    if settings.train_fp32_embeddings:
+        model = prepare_model_for_kbit_training(model)
+    else:
+        prepare_lean(model)
     model = get_peft_model(
         model,
         LoraConfig(
@@ -284,10 +332,24 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
         ),
     )
 
-    stamp = datetime.now(timezone.utc).strftime(STAMP_FORMAT)
-    output = settings.adapters_dir / stamp
-    output.mkdir(parents=True, exist_ok=True)
+    if benchmark_steps > 0:
+        output = settings.adapters_dir / "benchmark"  # not a timestamp, so --resume never picks it up
+        shutil.rmtree(output, ignore_errors=True)
+        output.mkdir(parents=True, exist_ok=True)
+    elif resume_dir is not None:
+        output = resume_dir
+    else:
+        stamp = datetime.now(timezone.utc).strftime(STAMP_FORMAT)
+        output = settings.adapters_dir / stamp
+        output.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(dataset_path, output / RUN_DATASET)
+    checkpoint = latest_checkpoint(output) if benchmark_steps <= 0 else None
+    if resume_dir is not None:
+        print(f"Resuming training from {checkpoint}" if checkpoint else f"No checkpoint in {output}; starting it over.")
+    save_steps = max(int(settings.checkpoint_steps), 0) if benchmark_steps <= 0 else 0
+    timer = _StepTimer(TrainerCallback)
     args = TrainingArguments(
+        max_steps=benchmark_steps if benchmark_steps > 0 else -1,
         output_dir=str(output),
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
@@ -296,9 +358,14 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
         fp16=True,
         bf16=False,
         logging_steps=1,
-        save_strategy="no",
+        save_strategy="steps" if save_steps else "no",
+        save_steps=save_steps or 500,
+        save_total_limit=1,
+        seed=TRAIN_SEED,
+        data_seed=TRAIN_SEED,
         report_to="none",
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         optim="paged_adamw_8bit",
     )
     trainer = Trainer(
@@ -306,15 +373,128 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
         args=args,
         train_dataset=dataset,
         data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True, label_pad_token_id=-100, pad_to_multiple_of=8),
+        callbacks=[timer],
     )
-    trainer.train()
+    torch.cuda.reset_peak_memory_stats()
+    trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint else None)
+    if benchmark_steps > 0:
+        total = torch.cuda.get_device_properties(0).total_memory
+        print(
+            benchmark_report(
+                timer.durations,
+                torch.cuda.max_memory_allocated(),
+                torch.cuda.max_memory_reserved(),
+                total,
+                settings,
+            )
+        )
+        del model
+        del trainer
+        torch.cuda.empty_cache()
+        shutil.rmtree(output, ignore_errors=True)
+        return output
     model.save_pretrained(output)
     tokenizer.save_pretrained(output)
     del model
     del trainer
     torch.cuda.empty_cache()
+    for leftover in output.glob("checkpoint-*"):
+        shutil.rmtree(leftover, ignore_errors=True)  # the final adapter is saved; checkpoints were only for resuming
     print(f"Saved adapter to {output}")
     return output
+
+
+def _StepTimer(base):
+    """A Trainer callback (built on transformers' TrainerCallback) that records seconds per optimizer step."""
+    import time
+
+    class StepTimer(base):
+        def __init__(self) -> None:
+            self.durations: list[float] = []
+            self._started = 0.0
+
+        def on_step_begin(self, args, state, control, **kwargs):
+            self._started = time.perf_counter()
+
+        def on_step_end(self, args, state, control, **kwargs):
+            self.durations.append(time.perf_counter() - self._started)
+
+    return StepTimer()
+
+
+def benchmark_report(durations: list[float], peak_allocated: int, peak_reserved: int, total: int, settings) -> str:
+    """Seconds per step (the first step, which warms up, is left out) and peak GPU memory."""
+    steady = sorted(durations[1:] or durations)
+    if not steady:
+        return "No steps finished."
+    median = steady[len(steady) // 2]
+    gib = 1024**3
+    lines = [
+        f"Benchmark: {len(durations)} step(s), median {median:.1f} s/step (first step {durations[0]:.1f} s, warm-up).",
+        f"Peak GPU memory: {peak_allocated / gib:.2f} GB in use, {peak_reserved / gib:.2f} GB reserved, "
+        f"of {total / gib:.2f} GB on the card.",
+        f"Settings: train_max_len={settings.train_max_len}, train_fp32_embeddings={settings.train_fp32_embeddings}.",
+    ]
+    if peak_reserved > total * 0.95:
+        lines.append(
+            "Reserved memory is at the card's limit, so Windows may be spilling into system RAM (Task Manager: "
+            "Shared GPU memory). Try a lower train_max_len."
+        )
+    return "\n".join(lines)
+
+
+def prepare_lean(model) -> int:
+    """Get a 4-bit model ready for LoRA without peft's blanket fp32 upcast.
+
+    peft's prepare_model_for_kbit_training casts every 16-bit weight to fp32, including the frozen
+    word-embedding table: about 311M numbers for Qwen2.5-3B, roughly 0.6 GB more on a 6 GB card for
+    weights that never train. Here the base model is frozen, only the small 1-D weights (norms and
+    biases) go to fp32 for stability, and gradient checkpointing is turned on. Returns how many
+    parameters were upcast.
+    """
+    import torch
+
+    upcast = 0
+    for param in model.parameters():
+        param.requires_grad = False
+        if param.ndim == 1 and param.dtype in (torch.float16, torch.bfloat16):
+            param.data = param.data.float()
+            upcast += param.numel()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.enable_input_require_grads()
+    return upcast
+
+
+def latest_checkpoint(run_dir: Path) -> Path | None:
+    """The highest-numbered checkpoint-N folder the Trainer saved in a run, if any."""
+    found = []
+    for path in run_dir.glob("checkpoint-*"):
+        suffix = path.name.split("-", 1)[1]
+        if path.is_dir() and suffix.isdigit():
+            found.append((int(suffix), path))
+    return max(found)[1] if found else None
+
+
+def adapter_finished(run_dir: Path) -> bool:
+    return (run_dir / "adapter_config.json").is_file()
+
+
+def latest_run(settings: Settings) -> Path | None:
+    """The newest adapters/<stamp> folder that either finished or can be resumed from a checkpoint.
+
+    A folder with neither (a run stopped before its first checkpoint) has nothing to continue from.
+    """
+    if not settings.adapters_dir.is_dir():
+        return None
+    runs = []
+    for path in settings.adapters_dir.iterdir():
+        try:
+            datetime.strptime(path.name, STAMP_FORMAT)
+        except ValueError:
+            continue
+        if path.is_dir() and (adapter_finished(path) or latest_checkpoint(path)):
+            runs.append(path)
+    return max(runs, key=lambda path: path.name, default=None)
 
 
 def merge_adapter(settings: Settings, adapter_dir: Path) -> Path:
@@ -441,11 +621,59 @@ def baseline_model(settings: Settings) -> str:
 
 
 def score_baseline(settings: Settings, client: OllamaClient) -> EvalResult:
+    """The current personal model's eval score. Reused when neither the model's weights nor the eval
+    tasks changed since it was last scored, which saves about ten minutes on the GTX 1660."""
     model = baseline_model(settings)
+    fingerprint = baseline_fingerprint(settings, client, model)
+    cached = load_state(settings).get("baseline_cache") or {}
+    if fingerprint and cached.get("fingerprint") == fingerprint:
+        result = EvalResult(model, int(cached["passed"]), int(cached["total"]))
+        print(f"Reusing the score of {model} from {cached.get('time', 'earlier')}: {result.summary()}")
+        return result
     print(f"Scoring the current personal model ({model}) before training...")
     result = run_eval(settings, client, settings.self_host, model, on_progress=_progress)
     print(result.summary())
+    _save_baseline(settings, fingerprint, result)
     return result
+
+
+def remember_baseline(settings: Settings, client: OllamaClient, model: str, result: EvalResult) -> None:
+    """Record a score for `model` as it is now, so the next run need not score it again."""
+    try:
+        _save_baseline(settings, baseline_fingerprint(settings, client, model), result)
+    except Exception:
+        pass  # only a shortcut; the next run scores the model instead
+
+
+def baseline_fingerprint(settings: Settings, client: OllamaClient, model: str) -> str | None:
+    """The model's Ollama digest plus a hash of the eval tasks. None when the digest is unknown."""
+    try:
+        tags = client.tags(settings.self_host)
+    except Exception:
+        return None
+    names = {model, f"{model}:latest"}
+    digest = next(
+        (tag.get("digest") for tag in tags if tag.get("name") in names or tag.get("model") in names),
+        None,
+    )
+    if not digest:
+        return None
+    tasks = [(task.id, task.prompt, task.tests) for task in load_tasks(settings)]
+    task_hash = hashlib.sha256(json.dumps(tasks, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+    return f"{model}|{digest}|{task_hash}"
+
+
+def _save_baseline(settings: Settings, fingerprint: str | None, result: EvalResult) -> None:
+    if not fingerprint:
+        return
+    state = load_state(settings)
+    state["baseline_cache"] = {
+        "fingerprint": fingerprint,
+        "passed": result.passed,
+        "total": result.total,
+        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    save_state(settings, state)
 
 
 def gate_candidate(

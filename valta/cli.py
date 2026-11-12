@@ -10,6 +10,7 @@ import typer
 from valta.config import load_settings
 from valta.engineer import run_goal
 from valta.external import DatasetAccessError, import_dataset, peek_dataset
+from valta.web import MAX_PAGES_LIMIT, learn_site
 from valta.ingest import ingest_path
 from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
@@ -23,8 +24,11 @@ from valta.train import (
     baseline_model,
     build_pairs,
     convert_to_gguf,
+    adapter_finished,
     create_valta,
     examples_before,
+    latest_run,
+    remember_baseline,
     free_training_gpu,
     latest_merged,
     gate_candidate,
@@ -127,6 +131,33 @@ def research():
     settings, memory, tools, client = _stack()
     filed = research_once(settings, memory, tools, client)
     typer.echo(f"Filed {filed} notes.")
+
+
+@app.command()
+def learn(
+    url: str = typer.Argument(..., help="Where to start, e.g. https://docs.python.org/3/library/"),
+    pages: int = typer.Option(30, "--pages", "-n", help=f"Most pages to read (at most {MAX_PAGES_LIMIT})."),
+    delay: float = typer.Option(1.0, "--delay", help="Seconds between requests. A robots.txt Crawl-delay wins if longer."),
+):
+    """Read a documentation site into memory: same site, under the same path, robots.txt respected."""
+    settings, memory, tools, client = _stack()
+    if not client.healthy(settings.heavy_host):
+        typer.echo("The RX 6600 server is down, so pages are stored without vectors (text search still finds them).")
+    typer.echo(f"Reading up to {pages} page(s) under {url}, {delay:g}s apart.")
+
+    def show(page_url: str, chunks: int) -> None:
+        typer.echo(f"  {chunks:>3} chunk(s)  {page_url}")
+
+    try:
+        stats = learn_site(settings, memory, tools, url, max_pages=pages, delay=delay, on_page=show)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except KeyboardInterrupt:
+        typer.echo("Stopped. Pages read so far are kept.")
+        return
+    typer.echo(stats.summary())
+    if stats.pages:
+        typer.echo("It is in memory now, so answers can use it. Training turns some of it into questions (doc_qa_pairs).")
 
 
 @app.command("memory")
@@ -234,6 +265,10 @@ def dataset_import(
     ),
     limit: int = typer.Option(2000, "--limit", help="Stop after keeping this many."),
     scan: int = typer.Option(200000, "--scan", help="Stop after reading this many, kept or not."),
+    min_answer: int = typer.Option(
+        0, "--min-answer", help="Skip conversations whose final answer is shorter than this many characters."
+    ),
+    code_only: bool = typer.Option(False, "--code-only", help="Keep only conversations whose final answer has code."),
 ):
     """Stream a dataset, keep conversations that pass the filters, and store them for `valta train`."""
     settings = load_settings()
@@ -245,7 +280,18 @@ def dataset_import(
 
     try:
         stats = import_dataset(
-            settings, memory, name, config, split, lang or None, ability, limit, scan, on_progress=progress
+            settings,
+            memory,
+            name,
+            config,
+            split,
+            lang or None,
+            ability,
+            limit,
+            scan,
+            on_progress=progress,
+            min_answer=min_answer,
+            code_only=code_only,
         )
     except DatasetAccessError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -357,7 +403,19 @@ def train(
     create_only: bool = typer.Option(False, "--create-only", help="Register an existing GGUF as valta."),
     skip_eval: bool = typer.Option(False, "--skip-eval", help="Promote the new model without scoring it first."),
     resume: bool = typer.Option(
-        False, "--resume", help="Skip training: convert the newest merged weights, score them, and promote if they pass."
+        False,
+        "--resume",
+        help="Continue the newest run from where it stopped (a checkpoint, the merge, or conversion), then score and promote.",
+    ),
+    max_examples: int = typer.Option(
+        0,
+        "--max-examples",
+        help="Train on about this many pairs at most, trimming imported-dataset pairs first. 0 means no limit.",
+    ),
+    benchmark: int = typer.Option(
+        0,
+        "--benchmark",
+        help="Train only this many steps in a scratch folder and report speed and GPU memory. Keeps nothing.",
     ),
 ):
     """Fine-tune the 3B on the GTX 1660, score it, and replace `valta` only if it did not get worse."""
@@ -367,6 +425,9 @@ def train(
             rollback(settings, client)
         except (RuntimeError, OllamaError) as exc:
             raise typer.BadParameter(str(exc)) from exc
+        return
+    if benchmark > 0:
+        _benchmark(settings, memory, client, benchmark)
         return
     if resume:
         _resume(settings, memory, client, skip_eval)
@@ -378,10 +439,10 @@ def train(
         modelfile = write_modelfile(settings, Path(gguf))
         create_valta(settings, client, modelfile)
         return
-    _train(settings, memory, client, skip_eval)
+    _train(settings, memory, client, skip_eval, max_examples)
 
 
-def _train(settings, memory, client, skip_eval: bool = False) -> None:
+def _train(settings, memory, client, skip_eval: bool = False, max_examples: int = 0) -> None:
     """Build pairs, fine-tune, score, and promote only if the new model did not get worse."""
     if not skip_eval and not client.healthy(settings.self_host):
         raise typer.BadParameter(
@@ -394,7 +455,7 @@ def _train(settings, memory, client, skip_eval: bool = False) -> None:
             f"{waiting} new example(s) queued. The threshold is {settings.train_threshold}. Training with what exists."
         )
     try:
-        dataset, example_ids = build_pairs(settings, memory, client)
+        dataset, example_ids = build_pairs(settings, memory, client, max_examples=max_examples)
     except RuntimeError as exc:
         raise typer.BadParameter(str(exc)) from exc
     baseline = None
@@ -409,24 +470,53 @@ def _train(settings, memory, client, skip_eval: bool = False) -> None:
     _finish(settings, memory, client, merged, baseline, example_ids, skip_eval)
 
 
+def _benchmark(settings, memory, client, steps: int) -> None:
+    """A few training steps on the last training set, to measure speed and memory. Nothing is kept."""
+    dataset = settings.datasets_dir / "train.jsonl"
+    if not dataset.is_file():
+        try:
+            dataset, _ids = build_pairs(settings, memory, client=None)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Benchmarking {steps} step(s) on {dataset}. Nothing is saved and `valta` is not touched.")
+    free_training_gpu(settings, client)
+    try:
+        run_qlora(settings, dataset, benchmark_steps=steps)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 def _resume(settings, memory, client, skip_eval: bool) -> None:
-    """Pick up after a run that trained and merged but stopped before the model was converted or scored."""
+    """Pick up the newest run wherever it stopped: mid-training, before the merge, or before conversion."""
+    run = latest_run(settings)
     merged = latest_merged(settings)
-    if merged is None:
-        raise typer.BadParameter(f"There are no merged weights in {settings.merged_dir}. Run `valta train`.")
+    if run is not None and (merged is None or run.name > merged.name):
+        stamp = run.name
+    elif merged is not None:
+        run, stamp = None, merged.name
+    else:
+        raise typer.BadParameter(
+            "Nothing to resume: no training checkpoint, finished adapter, or merged weights. Run `valta train`."
+        )
     if not skip_eval and not client.healthy(settings.self_host):
         raise typer.BadParameter(
             "The GTX 1660 server is down. It is needed to score the new model. "
             "Run scripts/start-ollama.ps1, or pass --skip-eval to promote without scoring."
         )
-    typer.echo(f"Resuming from {merged}")
+    stage = "merged weights" if run is None else ("a finished adapter" if adapter_finished(run) else "a checkpoint")
+    typer.echo(f"Resuming run {stamp} from {stage}.")
     baseline = None
     if not skip_eval:
         try:
             baseline = score_baseline(settings, client)
         except OllamaError as exc:
             raise typer.BadParameter(str(exc)) from exc
-    _finish(settings, memory, client, merged, baseline, examples_before(memory, merged.name), skip_eval)
+    if run is not None:
+        if not adapter_finished(run):
+            free_training_gpu(settings, client)
+            run_qlora(settings, None, resume_dir=run)
+        merged = merge_adapter(settings, run)
+    _finish(settings, memory, client, merged, baseline, examples_before(memory, stamp), skip_eval)
 
 
 def _finish(settings, memory, client, merged: Path, baseline, example_ids: list[str], skip_eval: bool) -> None:
@@ -459,6 +549,8 @@ def _finish(settings, memory, client, merged: Path, baseline, example_ids: list[
     modelfile = write_modelfile(settings, gguf)
     create_valta(settings, client, modelfile)
     memory.mark_examples_used(example_ids)
+    # `valta` now holds exactly the weights just scored, so the next run can reuse that score.
+    remember_baseline(settings, client, "valta", candidate)
 
 
 def main() -> None:

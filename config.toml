@@ -25,6 +25,10 @@ extra_models = []
 # layer (about 150,000 token scores per position). On the 6 GB GTX 1660, 1024 filled the card and spilled into
 # system RAM (about 58 s per step); 768 keeps 98% of a typical dataset. If training still crawls, try 640.
 train_max_len = 768
+# Save training progress every this many steps (one step is four examples). A stopped run continues
+# from the last save with `valta train --resume`. At about a minute per step on the GTX 1660, 25 loses
+# at most about 25 minutes. 0 turns saving off.
+checkpoint_steps = 25
 # How far a new fine-tune may score below the current model on the coding eval and still be promoted (0.1 = 10%).
 # 0 means it must match or beat the current score. With 12 eval tasks, 0.1 lets a model that lost a task through.
 eval_tolerance = 0.0
@@ -32,6 +36,10 @@ eval_tolerance = 0.0
 # Most conversations from imported datasets (`valta dataset import`) mixed into one fine-tune.
 # Keeps a large public dataset from drowning out your corrections and verified work. 0 leaves them out.
 external_max_pairs = 2000
+
+# Passages from ingested books and learned web pages (`valta learn`) that the teacher turns into one
+# question and answer each when training starts. Each is one teacher call, about half a minute.
+doc_qa_pairs = 20
 
 # Terminal colors. Any Textual theme: tokyo-night, nord, gruvbox, dracula, catppuccin-mocha, textual-dark, textual-light...
 ui_theme = "tokyo-night"

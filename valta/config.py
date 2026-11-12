@@ -34,6 +34,9 @@ class Settings:
     eval_tolerance: float = 0.0
     ui_theme: str = "tokyo-night"
     external_max_pairs: int = 2000
+    checkpoint_steps: int = 25
+    doc_qa_pairs: int = 20
+    train_fp32_embeddings: bool = False
 
     @property
     def data(self) -> Path:
@@ -129,6 +132,9 @@ def load_settings(root: Path | None = None) -> Settings:
         eval_tolerance=float(raw.get("eval_tolerance", 0.0)),
         ui_theme=str(raw.get("ui_theme", "tokyo-night")),
         external_max_pairs=int(raw.get("external_max_pairs", 2000)),
+        checkpoint_steps=int(raw.get("checkpoint_steps", 25)),
+        doc_qa_pairs=int(raw.get("doc_qa_pairs", 20)),
+        train_fp32_embeddings=bool(raw.get("train_fp32_embeddings", False)),
     )
     settings.ensure_dirs()
     return settings

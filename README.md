@@ -160,7 +160,9 @@ git clone --depth 1 https://github.com/ggml-org/llama.cpp "$env:LOCALAPPDATA\lla
 
 Do not install llama.cpp's own requirements file into this venv: it pins a CPU-only PyTorch. The converter writes Q8_0.
 
-If a run stops after training (the merged weights are in `data/merged`), `valta train --resume` converts, scores and promotes them without training again. `valta train --rollback` restores the previous Modelfile, or the base model when there is none.
+Training saves its progress every `checkpoint_steps` steps (default 25, about 25 minutes on the GTX 1660). If a run stops, `valta train --resume` continues the newest one from wherever it got to: from the last checkpoint, from the finished adapter if the merge did not happen, or from the merged weights if conversion did not happen. It trains on the exact dataset that run started with.
+
+`valta train --max-examples 500` makes a shorter run: imported-dataset pairs are trimmed first, and your own corrections and verified work are always kept. The current model's eval score is remembered with its Ollama digest, so when nothing changed since it was last scored, the next run skips that ten-minute step. `valta train --rollback` restores the previous Modelfile, or the base model when there is none.
 
 ## Commands
 
@@ -186,7 +188,7 @@ From the chat itself, Valta can decide to ingest a path you mention, research a 
 
 ## What it keeps
 
-SQLite (`data/valta.db`) is the source of truth. Chroma (`data/chroma`) stores vectors for the same records, embedded with `nomic-embed-text`. Kinds are book, research, chat, fact, and lesson.
+SQLite (`data/valta.db`) is the source of truth. Chroma (`data/chroma`) stores vectors for the same records, embedded with `nomic-embed-text`. Kinds are book, web, research, chat, fact, and lesson.
 
 Background research starts with the control center. It waits so your first message gets the GPU, then rotates through a topic queue, `data/interests.txt`, and headings from books you have ingested. Notes keep the source URL.
 
@@ -204,6 +206,20 @@ Two more are logged for later kinds of training, and are not used by `valta trai
 
 Every fine-tune starts again from the base model, so each run trains on all examples ever saved, not only the new ones. Training uses the model's own chat template and learns only from the answer. The root rules at the top of each pair are masked out. Examples longer than `train_max_len` tokens are skipped instead of cut.
 
+## Learning from websites
+
+`valta learn` reads a documentation site into memory:
+
+```powershell
+.\.venv\Scripts\valta.exe learn https://docs.python.org/3/library/pathlib.html --pages 30
+```
+
+- It stays on the same site and under the same path (a start of `/3/library/pathlib.html` reads under `/3/library/`), reads only HTML, drops `?query` and `#fragment` duplicates, and stops at `--pages` (at most 500).
+- It follows robots.txt, including `Crawl-delay`, and waits `--delay` seconds (default 1) between requests. It never logs in or sends cookies.
+- It keeps the page's `<main>` or `<article>` text when there is one, so menus and footers are left out. Pages are stored as kind `web` with their URL, and a page already learned is skipped next time.
+- What it learns is used at once: chat and the crew search memory before answering. Training also turns the newest book and web passages into questions, `doc_qa_pairs` of them (default 20), each one a teacher call when the run starts.
+- What you point it at is your call. Prefer documentation that allows reuse, and stay within each site's terms.
+
 ## Public datasets
 
 A public instruction dataset on Hugging Face can be mixed in, for example [BAAI/Infinity-Instruct](https://huggingface.co/datasets/BAAI/Infinity-Instruct). It is streamed, so only the records read are downloaded, and only the ones that pass the filters are kept.
@@ -211,12 +227,13 @@ A public instruction dataset on Hugging Face can be mixed in, for example [BAAI/
 ```powershell
 .\.venv\Scripts\hf.exe auth login                                            # once, for gated datasets
 .\.venv\Scripts\valta.exe dataset peek BAAI/Infinity-Instruct --config 7M -n 5
-.\.venv\Scripts\valta.exe dataset import BAAI/Infinity-Instruct --config 7M --ability code --limit 2000
+.\.venv\Scripts\valta.exe dataset import BAAI/Infinity-Instruct --config 7M --ability code --min-answer 200 --code-only --limit 2000
 .\.venv\Scripts\valta.exe dataset list
 .\.venv\Scripts\valta.exe dataset remove BAAI/Infinity-Instruct:7M
 ```
 
 - Gated datasets (Infinity-Instruct is one) need you to log in on the dataset page, accept its conditions, and sign in here with your own token.
+- `--min-answer 200` skips conversations whose final answer is shorter than 200 characters, such as one-line "describe this function" replies. `--code-only` keeps only answers that contain code. In a first import of Infinity-Instruct's code slice, about half the answers were one-liners.
 - `peek` shows each record's language, labels and first question, so you can pick `--ability` words. `--ability` matches any word in the record's labels and can be repeated. `--lang` defaults to `en`. `--scan` caps how many records are read.
 - Conversations are converted to user and assistant turns, and the dataset's own system prompts are dropped, because the root rules are the system message of every pair. Training learns from the last answer. Records longer than `train_max_len`, that overlap an eval task, or that conflict with the root rules are skipped.
 - They are stored apart from your own examples, in the `external_examples` table, and do not count toward `train_threshold`. Each fine-tune mixes in at most `external_max_pairs` (default 2000).
