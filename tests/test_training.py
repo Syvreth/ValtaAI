@@ -275,6 +275,11 @@ def test_research_notes_are_one_per_topic_capped_and_unlabelled():
     assert len(research_pairs(many)) == RESEARCH_MAX_PAIRS
     assert clean_note("Notes on Python packaging.") == "Notes on Python packaging."
     assert clean_note("**Note**: kept text") == "kept text"
+    assert clean_note("**Note on Python:**  Python is a language.") == "Python is a language."
+    assert clean_note("**Note for Valta Companion:**\n\nRun checks.") == "Run checks."
+    assert clean_note("**Python Download Page Note**\n\n- Latest version") == "- Latest version"
+    assert clean_note("**Isolated Workspaces in Paperclip**\nText") == "**Isolated Workspaces in Paperclip**\nText"
+    assert clean_note("A note: this stays.") == "A note: this stays."
 
 
 def test_default_gate_refuses_a_model_that_lost_a_task(tmp_path: Path):

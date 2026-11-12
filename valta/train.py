@@ -86,13 +86,18 @@ def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None 
 # Research notes are background reading, not corrections or verified work. A cap keeps them from
 # outnumbering the examples that matter.
 RESEARCH_MAX_PAIRS = 20
+# "**Note:**", "Note for Valta Companion:", "**Note on Python:**" at the very start of a note.
 _NOTE_LABEL = re.compile(
-    r"^\s*(?:\*\*)?\s*note(?:\s+for\s+companion)?\s*(?::\s*\*\*|\*\*\s*:|:)\s*", re.IGNORECASE
+    r"^\s*(?:\*\*)?\s*note(?:\s+(?:for|on|about)\s+[^:*\n]{1,40})?\s*(?::\s*\*\*|\*\*\s*:|:)\s*",
+    re.IGNORECASE,
 )
+# A first line that is only a bold heading with "note" in it, such as "**Python Download Page Note**".
+_NOTE_HEADING = re.compile(r"^\s*\*\*[^*\n]{0,60}\bnotes?\b[^*\n]{0,60}\*\*\s*:?[ \t]*(?:\n|$)", re.IGNORECASE)
 
 
 def clean_note(text: str) -> str:
     """Drop a leading "**Note:**" style label, so the model does not learn to open every answer with one."""
+    text = _NOTE_HEADING.sub("", text, count=1)
     return _NOTE_LABEL.sub("", text, count=1).strip()
 
 
