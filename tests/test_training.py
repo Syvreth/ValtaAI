@@ -254,3 +254,54 @@ def test_ollama_create_uploads_a_local_gguf_and_names_it_in_files(tmp_path: Path
     }
     client.create("http://h", "valta", "FROM qwen2.5-coder:3b\n")
     assert sent["create"]["from"] == "qwen2.5-coder:3b" and "files" not in sent["create"]
+
+
+def test_research_notes_are_one_per_topic_capped_and_unlabelled():
+    from valta.memory import Record
+    from valta.train import RESEARCH_MAX_PAIRS, clean_note, research_pairs
+
+    def note(title, text):
+        return Record(id=title + text, kind="research", title=title, text=text, url=None, source=None, created_at="")
+
+    newest_first = [
+        note("Local Voice Assistant", "**Note:**\n\nNewest summary."),
+        note("Local Voice Assistant", "**Note for Companion:** Older summary."),
+        note("local voice  assistant", "Same topic, other spacing."),
+        note("", "No title."),
+        note("Ajagara", "Note: A python."),
+    ]
+    assert research_pairs(newest_first) == [("Local Voice Assistant", "Newest summary."), ("Ajagara", "A python.")]
+    many = [note(f"topic {i}", "text") for i in range(RESEARCH_MAX_PAIRS + 5)]
+    assert len(research_pairs(many)) == RESEARCH_MAX_PAIRS
+    assert clean_note("Notes on Python packaging.") == "Notes on Python packaging."
+    assert clean_note("**Note**: kept text") == "kept text"
+
+
+def test_default_gate_refuses_a_model_that_lost_a_task(tmp_path: Path):
+    from valta.evals import EvalResult, should_promote
+
+    settings = _settings(tmp_path)
+    assert settings.eval_tolerance == 0.0
+    baseline = EvalResult("qwen2.5-coder:3b", passed=10, total=12)
+    assert not should_promote(baseline, EvalResult("valta-candidate", passed=9, total=12), settings.eval_tolerance)[0]
+    assert should_promote(baseline, EvalResult("valta-candidate", passed=10, total=12), settings.eval_tolerance)[0]
+
+
+def test_rollback_after_the_first_promotion_returns_to_the_base_model(tmp_path: Path):
+    import pytest
+
+    from valta.config import load_state, save_state
+    from valta.train import rollback
+
+    settings = _settings(tmp_path)
+    settings.models_dir.mkdir(parents=True, exist_ok=True)
+    save_state(settings, {"personal_model": "valta"})
+
+    class _NoCreate:
+        def create(self, *args):
+            raise AssertionError("rolling back to the base model should not create anything")
+
+    rollback(settings, _NoCreate())
+    assert load_state(settings)["personal_model"] == settings.self_model
+    with pytest.raises(RuntimeError):
+        rollback(settings, _NoCreate())

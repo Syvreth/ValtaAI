@@ -285,7 +285,10 @@ def train(
     """Fine-tune the 3B on the GTX 1660, score it, and replace `valta` only if it did not get worse."""
     settings, memory, _tools, client = _stack()
     if rollback_model:
-        rollback(settings, client)
+        try:
+            rollback(settings, client)
+        except (RuntimeError, OllamaError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
         return
     if resume:
         _resume(settings, memory, client, skip_eval)

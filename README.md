@@ -132,7 +132,15 @@ Training extras, when you want a real QLoRA run on the smaller card. Install a C
 .\.venv\Scripts\valta.exe train
 ```
 
-GGUF conversion uses llama.cpp’s `convert_hf_to_gguf.py` via `LLAMA_CPP_CONVERT` or `PATH`. `valta train --rollback` restores the previous Modelfile.
+GGUF conversion uses llama.cpp’s `convert_hf_to_gguf.py`, found via `LLAMA_CPP_CONVERT`, `PATH`, or a clone in `%LOCALAPPDATA%\llama.cpp`:
+
+```powershell
+git clone --depth 1 https://github.com/ggml-org/llama.cpp "$env:LOCALAPPDATA\llama.cpp"
+```
+
+Do not install llama.cpp's own requirements file into this venv: it pins a CPU-only PyTorch. The converter writes Q8_0.
+
+If a run stops after training (the merged weights are in `data/merged`), `valta train --resume` converts, scores and promotes them without training again. `valta train --rollback` restores the previous Modelfile, or the base model when there is none.
 
 ## Commands
 
@@ -152,7 +160,7 @@ Opening `valta` with no command is the control center. The commands below are th
 | `valta rules` | Print the root rules that are loaded. |
 | `valta eval` | Score a model on the coding eval. `--teacher` scores the 7B instead. |
 | `valta practice` | The teacher sets coding problems, tests check the answers, and what the 3B gets wrong is saved for training. `--count` sets how many to try, `--train` fine-tunes afterwards. |
-| `valta train` | Build pairs, QLoRA the 3B, score it, and replace `valta` only if it did not get worse. `--skip-eval` promotes without scoring. |
+| `valta train` | Build pairs, QLoRA the 3B, score it, and replace `valta` only if it did not get worse. `--skip-eval` promotes without scoring. `--resume` picks up from merged weights. `--rollback` goes back one model. |
 
 From the chat itself, Valta can decide to ingest a path you mention, research a topic, or start a job. You do not have to switch commands.
 
@@ -162,12 +170,17 @@ SQLite (`data/valta.db`) is the source of truth. Chroma (`data/chroma`) stores v
 
 Background research starts with the control center. It waits so your first message gets the GPU, then rotates through a topic queue, `data/interests.txt`, and headings from books you have ingested. Notes keep the source URL.
 
-Fine-tuning does not train on raw books. It builds question-and-answer pairs from corrections, verified solutions, research notes, and a small sample of book chunks. Pairs that conflict with the root rules are dropped. The system text of each pair is the current root rules.
+Fine-tuning does not train on raw books. It builds question-and-answer pairs from corrections, verified solutions, research notes, and a small sample of book chunks. Research notes are capped at 20, one per topic (the newest), with any leading "Note:" label removed, so background reading cannot outnumber corrections and verified work. Pairs that conflict with the root rules are dropped. The system text of each pair is the current root rules.
 
 Two kinds of example are saved as you work:
 
 - **Corrections.** Start a message with `correction:` and the right answer. A bare "no, that's wrong" is not saved, because it does not say what the right answer is.
 - **Verified solutions.** When a job passes its tests and the reviewer says PASS, the goal and the files it wrote are saved. Jobs that change Valta's own code are skipped, since those wait for your approval and can be denied.
+
+Two more are logged for later kinds of training, and are not used by `valta train` yet:
+
+- **Transcripts.** Every crew job outside Valta's own folder keeps its planner input and plan, and each coder round untrimmed: every action, every result, the tests and the reviewer's verdict (`transcripts` table).
+- **Preference pairs.** A correction keeps the reply it replaced, and a job that failed and was then repaired keeps the failed files next to the passing ones (`preference_pairs` table). These are the better-and-worse pairs that preference training (DPO) needs.
 
 Every fine-tune starts again from the base model, so each run trains on all examples ever saved, not only the new ones. Training uses the model's own chat template and learns only from the answer. The root rules at the top of each pair are masked out. Examples longer than `train_max_len` tokens are skipped instead of cut.
 
@@ -199,7 +212,7 @@ What this can and cannot do:
 
 `valta eval` asks a model for twelve small Python functions at temperature 0 and runs each reply against hidden asserts. Add your own tasks as JSON in `data/evals/` (`[{"id", "prompt", "tests"}]`; `tests` runs after `from solution import *`). Training pairs that contain an eval prompt are dropped, so the eval stays a fair test.
 
-`valta train` scores the current personal model, trains, loads the result as `valta-candidate`, and scores it. It replaces `valta` only if the score is within `eval_tolerance` of the old one or better. Scores are kept in `data/state.json` under `eval_history`.
+`valta train` scores the current personal model, trains, loads the result as `valta-candidate`, and scores it. It replaces `valta` only if the new score is at least the old one minus `eval_tolerance`. The default is 0, so the new model has to match or beat the old score. With twelve tasks, any tolerance below about 0.09 still means no lost task is allowed, and 0.1 lets a model that lost one task through. Scores are kept in `data/state.json` under `eval_history`.
 
 Limits worth knowing:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,9 +60,8 @@ def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None 
         add(row["user_text"], row["assistant_text"])
         example_ids.append(row["id"])
 
-    for record in memory.recent(limit=200, kind="research"):
-        question = f"What did you learn about {record.title or 'this topic'}?"
-        add(question, record.text)
+    for title, text in research_pairs(memory.recent(limit=200, kind="research")):
+        add(f"What did you learn about {title}?", text)
 
     if client and client.healthy(settings.heavy_host):
         for record in memory.recent(limit=20, kind="book"):
@@ -81,6 +81,40 @@ def build_pairs(settings: Settings, memory: Memory, client: OllamaClient | None 
     note = f" ({dropped} dropped for rule conflicts or eval overlap)" if dropped else ""
     print(f"Wrote {len(pairs)} training pairs to {path}{note}")
     return path, example_ids
+
+
+# Research notes are background reading, not corrections or verified work. A cap keeps them from
+# outnumbering the examples that matter.
+RESEARCH_MAX_PAIRS = 20
+_NOTE_LABEL = re.compile(
+    r"^\s*(?:\*\*)?\s*note(?:\s+for\s+companion)?\s*(?::\s*\*\*|\*\*\s*:|:)\s*", re.IGNORECASE
+)
+
+
+def clean_note(text: str) -> str:
+    """Drop a leading "**Note:**" style label, so the model does not learn to open every answer with one."""
+    return _NOTE_LABEL.sub("", text, count=1).strip()
+
+
+def research_pairs(records) -> list[tuple[str, str]]:
+    """One (title, text) per research topic, newest note first, at most RESEARCH_MAX_PAIRS.
+
+    Research runs revisit the same topic, and five different answers to one question teach the
+    model nothing but the shape of an answer. `records` is expected newest first.
+    """
+    seen: set[str] = set()
+    pairs: list[tuple[str, str]] = []
+    for record in records:
+        title = " ".join((record.title or "").split())
+        key = title.lower()
+        text = clean_note(record.text)
+        if not title or not text or key in seen:
+            continue
+        seen.add(key)
+        pairs.append((title, text))
+        if len(pairs) >= RESEARCH_MAX_PAIRS:
+            break
+    return pairs
 
 
 def _pair(rules: str, user_text: str, assistant_text: str) -> dict:
@@ -444,7 +478,14 @@ def _progress(task_id: str, ok: bool, note: str) -> None:
 def rollback(settings: Settings, client: OllamaClient) -> None:
     previous = settings.models_dir / "valta.previous.Modelfile"
     if not previous.exists():
-        raise RuntimeError("There is no previous Modelfile to roll back to.")
+        # The first promotion has nothing before it but the base model, so go back to that.
+        state = load_state(settings)
+        if state.get("personal_model") == settings.self_model:
+            raise RuntimeError(f"The personal model is already the base model, {settings.self_model}.")
+        state["personal_model"] = settings.self_model
+        save_state(settings, state)
+        print(f"Personal model is back to the base model, {settings.self_model}. The `valta` model is kept in Ollama.")
+        return
     modelfile = previous.read_text(encoding="utf-8")
     client.create(settings.self_host, "valta", modelfile)
     current = settings.models_dir / "valta.Modelfile"

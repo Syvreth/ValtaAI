@@ -24,7 +24,8 @@ extra_models = []
 # Longest training example in tokens. A 6 GB card cannot take much more than 2048.
 train_max_len = 1024
 # How far a new fine-tune may score below the current model on the coding eval and still be promoted (0.1 = 10%).
-eval_tolerance = 0.1
+# 0 means it must match or beat the current score. With 12 eval tasks, 0.1 lets a model that lost a task through.
+eval_tolerance = 0.0
 
 # Terminal colors. Any Textual theme: tokyo-night, nord, gruvbox, dracula, catppuccin-mocha, textual-dark, textual-light...
 ui_theme = "tokyo-night"
