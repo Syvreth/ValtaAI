@@ -22,7 +22,9 @@ from valta.train import (
     build_pairs,
     convert_to_gguf,
     create_valta,
+    examples_before,
     free_training_gpu,
+    latest_merged,
     gate_candidate,
     merge_adapter,
     modelfile_text,
@@ -276,11 +278,17 @@ def train(
     rollback_model: bool = typer.Option(False, "--rollback", help="Restore the previous valta Modelfile."),
     create_only: bool = typer.Option(False, "--create-only", help="Register an existing GGUF as valta."),
     skip_eval: bool = typer.Option(False, "--skip-eval", help="Promote the new model without scoring it first."),
+    resume: bool = typer.Option(
+        False, "--resume", help="Skip training: convert the newest merged weights, score them, and promote if they pass."
+    ),
 ):
     """Fine-tune the 3B on the GTX 1660, score it, and replace `valta` only if it did not get worse."""
     settings, memory, _tools, client = _stack()
     if rollback_model:
         rollback(settings, client)
+        return
+    if resume:
+        _resume(settings, memory, client, skip_eval)
         return
     if create_only:
         gguf = os.environ.get("VALTA_GGUF")
@@ -317,8 +325,40 @@ def _train(settings, memory, client, skip_eval: bool = False) -> None:
     free_training_gpu(settings, client)
     adapter = run_qlora(settings, dataset)
     merged = merge_adapter(settings, adapter)
-    gguf_path = settings.models_dir / f"{adapter.name}.gguf"
-    gguf = convert_to_gguf(merged, gguf_path)
+    _finish(settings, memory, client, merged, baseline, example_ids, skip_eval)
+
+
+def _resume(settings, memory, client, skip_eval: bool) -> None:
+    """Pick up after a run that trained and merged but stopped before the model was converted or scored."""
+    merged = latest_merged(settings)
+    if merged is None:
+        raise typer.BadParameter(f"There are no merged weights in {settings.merged_dir}. Run `valta train`.")
+    if not skip_eval and not client.healthy(settings.self_host):
+        raise typer.BadParameter(
+            "The GTX 1660 server is down. It is needed to score the new model. "
+            "Run scripts/start-ollama.ps1, or pass --skip-eval to promote without scoring."
+        )
+    typer.echo(f"Resuming from {merged}")
+    baseline = None
+    if not skip_eval:
+        try:
+            baseline = score_baseline(settings, client)
+        except OllamaError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    _finish(settings, memory, client, merged, baseline, examples_before(memory, merged.name), skip_eval)
+
+
+def _finish(settings, memory, client, merged: Path, baseline, example_ids: list[str], skip_eval: bool) -> None:
+    """Convert merged weights to GGUF, score them, and promote them to `valta` only if they pass the gate."""
+    gguf_path = settings.models_dir / f"{merged.name}.gguf"
+    if gguf_path.is_file():
+        typer.echo(f"Using the GGUF already converted at {gguf_path}")
+        gguf = gguf_path
+    else:
+        try:
+            gguf = convert_to_gguf(merged, gguf_path)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     candidate_modelfile = modelfile_text(settings, gguf)
     if skip_eval:
         modelfile = write_modelfile(settings, gguf)
@@ -329,7 +369,7 @@ def _train(settings, memory, client, skip_eval: bool = False) -> None:
         promote, candidate, reason = gate_candidate(settings, client, candidate_modelfile, baseline)
     except OllamaError as exc:
         raise typer.BadParameter(f"Could not score the new model, so `valta` was left as it was. {exc}") from exc
-    record_eval(settings, adapter.name, baseline, candidate, promote)
+    record_eval(settings, merged.name, baseline, candidate, promote)
     if not promote:
         typer.echo(f"Not promoted. {reason}")
         typer.echo(f"The weights are kept at {gguf}. `valta` is unchanged.")

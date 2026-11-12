@@ -134,12 +134,8 @@ def run_goal(
     lessons = _lesson_text(tools, goal)
     listing = _safe_list(tools)
     _checkpoint(control)
-    plan = _ask(
-        settings,
-        client,
-        role="You are the planner. Write a short plan. Do not edit files.",
-        user=f"Goal:\n{goal}\n\nProject files:\n{listing}\n\nLessons:\n{lessons}",
-    )
+    planner_input = f"Goal:\n{goal}\n\nProject files:\n{listing}\n\nLessons:\n{lessons}"
+    plan = _ask(settings, client, role=PLANNER_ROLE, user=planner_input)
     _emit(on_event, "planner", plan)
     feedback = "Carry out the plan. Use one ACTION at a time."
     summary = ""
@@ -147,14 +143,22 @@ def run_goal(
     passed = False
     stopped = False
     writes: dict[str, str] = {}
+    rounds: list[dict] = []
+    failed_attempts: list[dict[str, str]] = []
     try:
         for round_index in range(settings.repair_rounds + 1):
             _checkpoint(control)
             if round_index:
                 _emit(on_event, "repair", f"Attempt {round_index + 1}. {feedback}")
-            summary, wrote = _coder_round(settings, client, tools, goal, plan, feedback, on_event, control, writes)
+            round_log: dict = {"messages": [], "tests": "", "verdict": ""}
+            rounds.append(round_log)
+            summary, wrote = _coder_round(
+                settings, client, tools, goal, plan, feedback, on_event, control, writes,
+                transcript=round_log["messages"],
+            )
             _checkpoint(control)
             test_output = _run_checks(tools, test_cmd)
+            round_log["tests"] = test_output
             _emit(on_event, "tester", test_output)
             if not wrote:
                 passed = False
@@ -163,9 +167,10 @@ def run_goal(
                 verdict = _ask(
                     settings,
                     client,
-                    role="You are the reviewer. Reply PASS or FAIL, then one sentence.",
+                    role=REVIEWER_ROLE,
                     user=f"Goal:\n{goal}\n\nPlan:\n{plan}\n\nCoder summary:\n{summary}\n\nTests:\n{test_output}",
                 )
+                round_log["verdict"] = verdict
                 _emit(on_event, "reviewer", verdict)
                 passed = verdict.strip().upper().startswith("PASS")
                 if passed:
@@ -173,6 +178,8 @@ def run_goal(
                 feedback = f"The reviewer said the goal is not met.\n{verdict}"
             else:
                 feedback = f"The tests failed. Repair the code.\n{test_output}"
+            if not passed and wrote:
+                failed_attempts.append(dict(writes))
             if round_index == settings.repair_rounds:
                 break
     except JobStopped:
@@ -181,6 +188,10 @@ def run_goal(
     status = "stopped" if stopped else "passed" if passed else "failed"
     if passed:
         _save_verified_example(settings, memory, tools, goal, writes)
+    if not _is_own_code(settings, tools):
+        _save_transcript(settings, memory, tools, goal, status, planner_input, plan, rounds)
+        if passed:
+            _save_repair_preferences(memory, goal, failed_attempts, writes)
     tools.save_note(
         text=f"Goal: {goal}\nStatus: {status}\nSummary: {summary}\n\n{test_output}",
         title=goal[:200],
@@ -206,7 +217,7 @@ def _save_verified_example(settings, memory, tools, goal: str, writes: dict[str,
     """
     if not writes:
         return
-    if tools.project.resolve() == settings.root.resolve():
+    if _is_own_code(settings, tools):
         return
     answer = format_solution(writes)
     if len(answer) > VERIFIED_MAX_CHARS or memory.example_exists(goal, answer):
@@ -214,10 +225,51 @@ def _save_verified_example(settings, memory, tools, goal: str, writes: dict[str,
     memory.add_example(goal, answer, source_id="verified")
 
 
+def _is_own_code(settings, tools) -> bool:
+    """Jobs on Valta's own code wait for approval and can be denied, so they are not training data."""
+    return tools.project.resolve() == settings.root.resolve()
+
+
+def _save_transcript(settings, memory, tools, goal, status, planner_input, plan, rounds) -> None:
+    """Every message of every round, untrimmed, so the coder can later be trained on how it worked."""
+    body = {
+        "planner": {"system": PLANNER_ROLE, "user": planner_input, "plan": plan},
+        "coder_system": CODER_ROLE,
+        "reviewer_system": REVIEWER_ROLE,
+        "rounds": rounds,
+    }
+    try:
+        memory.add_transcript(goal, status, settings.teacher_model, str(tools.project), body)
+    except Exception as exc:  # logging must never fail a job
+        print(f"[memory] could not save the transcript: {exc}")
+
+
+def _save_repair_preferences(memory, goal: str, failed_attempts: list[dict[str, str]], final: dict[str, str]) -> None:
+    """Each round that failed its tests or review, against the round that passed, is a preference pair."""
+    chosen = format_solution(final)
+    if len(chosen) > VERIFIED_MAX_CHARS:
+        return
+    for attempt in failed_attempts:
+        rejected = format_solution(attempt)
+        if len(rejected) <= VERIFIED_MAX_CHARS:
+            memory.add_preference(goal, chosen, rejected, source="repair")
+
+
+PLANNER_ROLE = "You are the planner. Write a short plan. Do not edit files."
+CODER_ROLE = (
+    "You are the coder. You can read and write files inside the project. When the goal asks for a file, "
+    "use ACTION write_file. Do not refuse. Follow the action format. Never use the sample path relative/path."
+)
+REVIEWER_ROLE = "You are the reviewer. Reply PASS or FAIL, then one sentence."
+
+
 def _coder_round(
-    settings, client, tools, goal, plan, feedback, on_event=None, control=None, writes=None
+    settings, client, tools, goal, plan, feedback, on_event=None, control=None, writes=None, transcript=None
 ) -> tuple[str, bool]:
+    """One coder pass. `transcript`, when given, receives every message untrimmed, in order."""
     history = [{"role": "user", "content": f"Goal:\n{goal}\n\nPlan:\n{plan}\n\n{feedback}\n\n{ACTION_HELP}"}]
+    if transcript is not None:
+        transcript.append(history[0])
     summary = ""
     wrote = False
     for _step in range(settings.work_max_steps):
@@ -225,7 +277,7 @@ def _coder_round(
         reply = _ask(
             settings,
             client,
-            role="You are the coder. You can read and write files inside the project. When the goal asks for a file, use ACTION write_file. Do not refuse. Follow the action format. Never use the sample path relative/path.",
+            role=CODER_ROLE,
             user="",
             history=history,
         )
@@ -239,6 +291,8 @@ def _coder_round(
             else:
                 summary = action.summary or "Finished the edit pass."
                 _emit(on_event, "coder", summary)
+                if transcript is not None:
+                    transcript.append({"role": "assistant", "content": reply})
                 return summary, True
         else:
             rejected = _example_action(action)
@@ -252,8 +306,10 @@ def _coder_round(
                         writes[action.path] = action.content
             detail = action.path or action.command or action.query or action.name
             _emit(on_event, "coder", f"{action.name} {detail}\n{result}")
-        history.append({"role": "assistant", "content": reply})
-        history.append({"role": "user", "content": str(result)})
+        exchange = [{"role": "assistant", "content": reply}, {"role": "user", "content": str(result)}]
+        history.extend(exchange)
+        if transcript is not None:
+            transcript.extend(exchange)
         history = _trim_history(history)
     return summary or "Stopped at the step limit before ACTION done.", wrote
 

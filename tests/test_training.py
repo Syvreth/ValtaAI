@@ -142,3 +142,54 @@ def test_failed_jobs_and_edits_to_valta_itself_are_not_saved(tmp_path: Path):
     own = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.3, 0.1, 0.2], settings.root)
     assert run_goal(settings, memory, own, _Scripted(_GOOD_RUN), "add hello.py")
     assert memory.all_examples() == []
+
+
+def test_gguf_conversion_uses_this_python_and_a_supported_outtype(tmp_path: Path, monkeypatch):
+    import subprocess
+    import sys
+
+    from valta.train import convert_to_gguf
+
+    calls = []
+    monkeypatch.setenv("LLAMA_CPP_CONVERT", "convert_hf_to_gguf.py")
+    monkeypatch.setattr(subprocess, "run", lambda argv, check: calls.append(argv))
+    out = convert_to_gguf(tmp_path / "merged", tmp_path / "models" / "x.gguf")
+    assert out == tmp_path / "models" / "x.gguf"
+    [argv] = calls
+    assert argv[0] == sys.executable
+    assert argv[argv.index("--outtype") + 1] in {"f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"}
+
+
+def test_converter_is_found_in_a_local_llama_cpp_clone(tmp_path: Path, monkeypatch):
+    import shutil
+
+    from valta.train import find_converter
+
+    script = tmp_path / "llama.cpp" / "convert_hf_to_gguf.py"
+    script.parent.mkdir()
+    script.write_text("", encoding="utf-8")
+    monkeypatch.delenv("LLAMA_CPP_CONVERT", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert find_converter() == str(script)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nowhere"))
+    assert find_converter() is None
+
+
+def test_resume_finds_the_newest_merge_and_the_examples_it_trained_on(tmp_path: Path):
+    from valta.train import examples_before, latest_merged
+
+    settings = _settings(tmp_path)
+    assert latest_merged(settings) is None
+    for name in ("20261101000000", "20261112001329", "not-a-run"):
+        (settings.merged_dir / name).mkdir(parents=True)
+        (settings.merged_dir / name / "config.json").write_text("{}", encoding="utf-8")
+    (settings.merged_dir / "20991231000000").mkdir()  # no config.json: an unfinished merge
+    assert latest_merged(settings).name == "20261112001329"
+    memory = Memory(settings)
+    old = memory.add_example("q1", "a1")
+    memory.conn.execute("UPDATE training_examples SET created_at = ? WHERE id = ?", ("2026-11-11T23:00:00+00:00", old))
+    new = memory.add_example("q2", "a2")
+    memory.conn.execute("UPDATE training_examples SET created_at = ? WHERE id = ?", ("2026-11-12T01:00:00+00:00", new))
+    memory.conn.commit()
+    assert examples_before(memory, "20261112001329") == [old]

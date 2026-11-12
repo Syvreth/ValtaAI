@@ -346,13 +346,19 @@ def _capture_correction(memory: Memory, history: list, user_text: str) -> None:
     if not lowered.startswith("correction:"):
         return
     prior_user = ""
+    prior_answer = ""
     for message in reversed(history):
-        if message["role"] == "user":
+        if message["role"] == "assistant" and not prior_user and not prior_answer:
+            prior_answer = message["content"]
+        elif message["role"] == "user":
             prior_user = message["content"]
             break
     desired = user_text.split(":", 1)[-1].strip()
     if prior_user and desired:
         memory.add_example(prior_user, desired)
+        if prior_answer:
+            # The reply being corrected is the worse answer to the same question.
+            memory.add_preference(prior_user, desired, prior_answer, source="correction")
 
 
 def _capture_uncertainty(memory: Memory, user_text: str, answer: str) -> None:

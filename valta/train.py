@@ -229,7 +229,7 @@ def run_qlora(settings: Settings, dataset_path: Path) -> Path:
         ),
     )
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime(STAMP_FORMAT)
     output = settings.adapters_dir / stamp
     output.mkdir(parents=True, exist_ok=True)
     args = TrainingArguments(
@@ -285,22 +285,72 @@ def merge_adapter(settings: Settings, adapter_dir: Path) -> Path:
     return merged
 
 
+def find_converter() -> str | None:
+    """llama.cpp's convert_hf_to_gguf.py: LLAMA_CPP_CONVERT, then PATH, then a clone in %LOCALAPPDATA%\\llama.cpp."""
+    found = os.environ.get("LLAMA_CPP_CONVERT") or shutil.which("convert_hf_to_gguf.py")
+    if found:
+        return found
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        default = Path(local) / "llama.cpp" / "convert_hf_to_gguf.py"
+        if default.is_file():
+            return str(default)
+    return None
+
+
 def convert_to_gguf(merged_dir: Path, gguf_path: Path) -> Path:
-    convert = os.environ.get("LLAMA_CPP_CONVERT") or shutil.which("convert_hf_to_gguf.py")
+    convert = find_converter()
     if not convert:
         raise RuntimeError(
             "The adapter is saved, and the merged weights are in data/merged. "
-            "Set LLAMA_CPP_CONVERT to llama.cpp's convert_hf_to_gguf.py, run it, "
-            "then `valta train --create-only` with VALTA_GGUF pointing at the .gguf file."
+            "Clone llama.cpp into %LOCALAPPDATA%\\llama.cpp (or set LLAMA_CPP_CONVERT to its "
+            "convert_hf_to_gguf.py), then run `valta train --resume` to convert, score and promote "
+            "without training again."
         )
     import subprocess
+    import sys
 
     gguf_path.parent.mkdir(parents=True, exist_ok=True)
+    # sys.executable, not "python": the converter needs this venv's torch and transformers, and a bare
+    # "python" can be a different install entirely. The converter cannot write Q4_K_M (its --outtype
+    # choices are f32, f16, bf16, q8_0, tq1_0, tq2_0, auto); Q8_0 keeps a 3B near full quality and
+    # still fits a 6 GB card.
     subprocess.run(
-        ["python", convert, str(merged_dir), "--outfile", str(gguf_path), "--outtype", "q4_k_m"],
+        [sys.executable, convert, str(merged_dir), "--outfile", str(gguf_path), "--outtype", GGUF_OUTTYPE],
         check=True,
     )
     return gguf_path
+
+
+GGUF_OUTTYPE = "q8_0"
+
+
+STAMP_FORMAT = "%Y%m%d%H%M%S"
+
+
+def latest_merged(settings: Settings) -> Path | None:
+    """The newest merged-weights folder. Folder names are UTC timestamps, so the largest name is the newest."""
+    if not settings.merged_dir.is_dir():
+        return None
+    runs = []
+    for path in settings.merged_dir.iterdir():
+        try:
+            datetime.strptime(path.name, STAMP_FORMAT)
+        except ValueError:
+            continue
+        if path.is_dir() and (path / "config.json").is_file():
+            runs.append(path)
+    return max(runs, key=lambda path: path.name, default=None)
+
+
+def examples_before(memory: Memory, stamp: str) -> list[str]:
+    """Ids of the examples saved before a run's timestamp: the ones that run trained on."""
+    cutoff = datetime.strptime(stamp, STAMP_FORMAT).replace(tzinfo=timezone.utc)
+    return [
+        row["id"]
+        for row in memory.all_examples()
+        if datetime.fromisoformat(row["created_at"]) < cutoff
+    ]
 
 
 def modelfile_text(settings: Settings, gguf_path: Path) -> str:

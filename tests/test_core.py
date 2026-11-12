@@ -347,6 +347,71 @@ def test_work_loop_edits_tests_and_remembers(tmp_path: Path):
     assert memory.conn.execute("SELECT COUNT(*) AS n FROM agents").fetchone()["n"] == 4
 
 
+def test_a_repaired_job_saves_its_transcript_and_a_preference_pair(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    project = tmp_path / "proj"
+    project.mkdir()
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.3, 0.1, 0.2], project)
+    client = _Scripted(
+        [
+            "Write calc.py.",
+            "ACTION write_file\nPATH calc.py\nCONTENT\ndef add(a, b)\n    return a + b\nEND",
+            "ACTION done\nSUMMARY First try\nEND",
+            "ACTION write_file\nPATH calc.py\nCONTENT\ndef add(a, b):\n    return a + b\nEND",
+            "ACTION done\nSUMMARY Fixed the syntax\nEND",
+            "PASS It adds.",
+        ]
+    )
+    assert run_goal(settings, memory, tools, client, "write an add function in calc.py")
+    [transcript] = memory.all_transcripts()
+    assert transcript["status"] == "passed"
+    body = transcript["body"]
+    assert body["planner"]["plan"] == "Write calc.py."
+    assert len(body["rounds"]) == 2
+    first, second = body["rounds"]
+    assert [m["role"] for m in first["messages"]] == ["user", "assistant", "user", "assistant"]
+    assert "def add(a, b)\n" in first["messages"][1]["content"]
+    assert not first["tests"].startswith("exit 0") and first["verdict"] == ""
+    assert second["verdict"].startswith("PASS")
+    [pair] = memory.all_preferences()
+    assert pair["source"] == "repair"
+    assert "def add(a, b):" in pair["chosen"] and "def add(a, b)\n" in pair["rejected"]
+
+
+def test_jobs_on_valtas_own_code_are_not_logged_for_training(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.3, 0.1, 0.2], settings.root)
+    client = _Scripted(
+        [
+            "Add hello.py.",
+            "ACTION write_file\nPATH hello.py\nCONTENT\nprint('hi')\nEND",
+            "ACTION done\nSUMMARY Added hello.py\nEND",
+            "PASS ok",
+        ]
+    )
+    assert run_goal(settings, memory, tools, client, "add hello.py")
+    assert memory.all_transcripts() == []
+    assert memory.all_preferences() == []
+
+
+def test_a_correction_keeps_the_answer_it_replaced(tmp_path: Path):
+    from valta.chat import _capture_correction
+
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    history = [
+        {"role": "user", "content": "What is 2 + 2?"},
+        {"role": "assistant", "content": "5"},
+    ]
+    _capture_correction(memory, history, "correction: 4")
+    [pair] = memory.all_preferences()
+    assert (pair["prompt"], pair["chosen"], pair["rejected"], pair["source"]) == ("What is 2 + 2?", "4", "5", "correction")
+    assert memory.add_preference("What is 2 + 2?", "4", "5", "correction") is None
+    assert memory.add_preference("same", "x", "x", "correction") is None
+
+
 def test_a_pass_requires_a_written_file(tmp_path: Path):
     settings = _settings(tmp_path)
     settings.work_max_steps = 1

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import uuid
@@ -79,6 +80,23 @@ class Memory:
               topic TEXT NOT NULL,
               status TEXT NOT NULL,
               source TEXT,
+              created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS transcripts (
+              id TEXT PRIMARY KEY,
+              goal TEXT NOT NULL,
+              status TEXT NOT NULL,
+              model TEXT NOT NULL,
+              project TEXT NOT NULL,
+              body TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS preference_pairs (
+              id TEXT PRIMARY KEY,
+              prompt TEXT NOT NULL,
+              chosen TEXT NOT NULL,
+              rejected TEXT NOT NULL,
+              source TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_records_kind ON records(kind, created_at);
@@ -282,6 +300,61 @@ class Memory:
                 [(example_id,) for example_id in ids],
             )
             self.conn.commit()
+
+    def add_transcript(self, goal: str, status: str, model: str, project: str, body: dict) -> str:
+        """Every step of one crew job: the planner, then each coder round with its actions, results and tests.
+
+        Kept for training the coder on how it works, not only on the files it ended with.
+        """
+        transcript_id = uuid.uuid4().hex
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT INTO transcripts (id, goal, status, model, project, body, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (transcript_id, goal, status, model, project, json.dumps(body, ensure_ascii=False), _now()),
+            )
+            self.conn.commit()
+        return transcript_id
+
+    def all_transcripts(self, status: str | None = None) -> list[dict]:
+        if status:
+            rows = self.conn.execute(
+                "SELECT * FROM transcripts WHERE status = ? ORDER BY created_at", (status,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM transcripts ORDER BY created_at").fetchall()
+        return [{**dict(row), "body": json.loads(row["body"])} for row in rows]
+
+    def add_preference(self, prompt: str, chosen: str, rejected: str, source: str) -> str | None:
+        """A better and a worse answer to the same prompt, for preference training (DPO) later.
+
+        Returns None when the pair is empty, the two answers match, or the pair is already stored.
+        """
+        prompt, chosen, rejected = prompt.strip(), chosen.strip(), rejected.strip()
+        if not prompt or not chosen or not rejected or chosen == rejected:
+            return None
+        exists = self.conn.execute(
+            "SELECT 1 FROM preference_pairs WHERE prompt = ? AND chosen = ? AND rejected = ? LIMIT 1",
+            (prompt, chosen, rejected),
+        ).fetchone()
+        if exists:
+            return None
+        pair_id = uuid.uuid4().hex
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT INTO preference_pairs (id, prompt, chosen, rejected, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (pair_id, prompt, chosen, rejected, source, _now()),
+            )
+            self.conn.commit()
+        return pair_id
+
+    def all_preferences(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM preference_pairs ORDER BY created_at").fetchall()
 
     def enqueue_topic(self, topic: str, source: str = "") -> None:
         cleaned = " ".join(topic.split())
