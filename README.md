@@ -100,6 +100,26 @@ The 7B stays the model that researches and writes code. The 3B is the one that c
 
 Hosts, context length, research limits, and the training threshold live in `config.toml`.
 
+### Both cards for one model (combined mode)
+
+Through Vulkan, one Ollama server can see the RX 6600 and the GTX 1660 together, about 14 GB, and spread a model across them. That fits a teacher neither card holds alone, such as `qwen2.5-coder:14b` (about 9 GB at 4-bit).
+
+```powershell
+.\scripts\stop-ollama.ps1
+.\scripts\start-ollama.ps1 -Mode combined
+ollama pull qwen2.5-coder:14b
+ollama run qwen2.5-coder:14b "hi"
+ollama ps                                      # PROCESSOR should read 100% GPU
+.\.venv\Scripts\valta.exe eval --teacher --model qwen2.5-coder:14b
+```
+
+If the eval beats the 7B, set `teacher_model = "qwen2.5-coder:14b"` in `config.toml`. Go back with `stop-ollama.ps1`, then `start-ollama.ps1` with no mode.
+
+- In combined mode there is no server on 11435: no personal model, and `valta train`, `valta practice` and plain `valta eval` stop with a message. Chat falls back to the teacher.
+- Training cannot use both cards. PyTorch drives NVIDIA through CUDA and AMD through ROCm, one training run cannot mix them, and the RX 6600 has no supported PyTorch on Windows. Training stays on the GTX 1660, in separate mode.
+- Splitting a model across two cards over PCIe is slower than one card holding it. The 14B will answer more slowly than the 7B. Whether it is better enough is what the eval is for.
+- `ollama ps` showing a CPU share means the model did not fit in the two cards' memory. `data\logs\ollama-combined.err.log` lists how many layers went to each device.
+
 ## Quick start
 
 Python 3.11 or newer, and [Ollama](https://ollama.com). On the machine this was built for, quit the Ollama tray app first so port 11434 can be bound to the AMD card.
