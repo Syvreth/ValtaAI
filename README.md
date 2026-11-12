@@ -162,6 +162,10 @@ Do not install llama.cpp's own requirements file into this venv: it pins a CPU-o
 
 Training saves its progress every `checkpoint_steps` steps (default 25, about 25 minutes on the GTX 1660). If a run stops, `valta train --resume` continues the newest one from wherever it got to: from the last checkpoint, from the finished adapter if the merge did not happen, or from the merged weights if conversion did not happen. It trains on the exact dataset that run started with.
 
+`valta train --benchmark 8` trains eight steps on the last training set in a scratch folder and prints seconds per step and peak GPU memory, then deletes everything. Use it to try a setting, such as a lower `train_max_len`, before committing a night to a run.
+
+Training leaves the frozen word-embedding table in 16-bit. peft's usual preparation converts it to 32-bit, which costs about 0.6 GB on a 6 GB card for weights that never train. Only the small norm weights go to 32-bit. `train_fp32_embeddings = true` in `config.toml` restores peft's behaviour if a run ever trains unstably.
+
 `valta train --max-examples 500` makes a shorter run: imported-dataset pairs are trimmed first, and your own corrections and verified work are always kept. The current model's eval score is remembered with its Ollama digest, so when nothing changed since it was last scored, the next run skips that ten-minute step. `valta train --rollback` restores the previous Modelfile, or the base model when there is none.
 
 ## Commands
