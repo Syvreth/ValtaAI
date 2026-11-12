@@ -9,7 +9,9 @@ hf_base = "Qwen/Qwen2.5-Coder-3B-Instruct"
 teacher_num_ctx = 32768
 self_num_ctx = 32768
 
-research_interval_sec = 300
+# Seconds between background research cycles while the control center is open. 0 turns background research
+# off; `valta research`, asking for research in chat, and `valta learn` still work.
+research_interval_sec = 0
 research_page_cap = 3
 train_threshold = 8
 
@@ -18,6 +20,9 @@ chunk_overlap = 400
 top_k = 5
 work_max_steps = 8
 repair_rounds = 2
+# true: the coder calls its tools through Ollama's tool calling. false: it writes ACTION blocks that Valta parses,
+# which suits models that are weak at tool calling, such as Qwen2.5-Coder. Valta reads an ACTION block either way.
+native_tools = false
 
 extra_models = []
 

@@ -244,7 +244,7 @@ class ValtaApp(App):
         threading.Thread(target=self._watch_models, daemon=True).start()
         self.refresh_panels()
         self._tick()
-        if self.start_research:
+        if self.start_research and self.settings.research_interval_sec > 0:
             self._stop = threading.Event()
             threading.Thread(
                 target=research_loop,
@@ -301,7 +301,7 @@ class ValtaApp(App):
 
     def _welcome(self) -> None:
         chat = self._chat()
-        chat.add(Text("Remembers what you tell it, researches on its own, and builds software.", style="dim"))
+        chat.add(Text("Remembers what you tell it, looks things up, and builds software.", style="dim"))
         chat.add("")
         for line in ("Build me a calculator", "Research how vector databases work", "Remember that I prefer Python"):
             row = Text("  try  ", style="dim")
@@ -665,7 +665,7 @@ class ValtaApp(App):
     def _approval_lines(self) -> list:
         waiting = [job for job in self.jobs.approvals if job.status == "awaiting approval"]
         if not waiting:
-            return [Text("Nothing is waiting.\nChanges to Valta's own code and deploys stop here for you.", style="dim")]
+            return [Text("Nothing is waiting.\nChanges to Valta's own code stop here for you.", style="dim")]
         primary = self._color("primary")
         items: list = []
         for job in waiting:

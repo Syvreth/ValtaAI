@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import queue
 import re
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from valta.config import Settings, load_state
@@ -11,7 +13,7 @@ from valta.memory import Memory
 from valta.ollama_client import OllamaClient, OllamaError
 from valta.prompt import build_system
 from valta.research import research_loop, research_once
-from valta.tools import ToolError, ToolRunner
+from valta.tools import ToolRunner
 
 CHAT_ROLE = """
 You are Valta, in one ongoing chat. The user should not have to run commands.
@@ -20,8 +22,7 @@ TALK
 INGEST <path>
 RESEARCH <topic>
 WORK <goal>
-DEPLOY <what>
-Use TALK when they are conversing. Use INGEST when they want a file or folder read into memory. Use RESEARCH when they want you to look something up. Use WORK when they want software created or changed, or when they ask you to create, edit, read, or list files. Use DEPLOY when they want a finished project released. If the first line is TALK, the rest of the reply is what you say. If it is a task, the first line is the whole reply.
+Use TALK when they are conversing. Use INGEST when they want a file or folder read into memory. Use RESEARCH when they want you to look something up. Use WORK when they want software created or changed, or when they ask you to create, edit, read, or list files. If the first line is TALK, the rest of the reply is what you say. If it is a task, the first line is the whole reply.
 You have a filesystem. Do not claim that you cannot create or read files. Do not research how to make a file the user already asked you to make.
 """.strip()
 
@@ -84,7 +85,7 @@ def interpret(answer: str) -> tuple[str, str, str]:
     upper = line.upper()
     if upper == "TALK":
         return "talk", "", rest.strip()
-    for kind in ("INGEST ", "RESEARCH ", "WORK ", "DEPLOY "):
+    for kind in ("INGEST ", "RESEARCH ", "WORK "):
         if upper.startswith(kind):
             return kind.strip().lower(), line.split(" ", 1)[1].strip().strip('"'), ""
     action = parse_action(cleaned)
@@ -122,9 +123,6 @@ def perform_task(kind: str, arg: str, settings: Settings, memory: Memory, tools:
         if passed:
             return f"Finished: {arg}"
         return f"Could not finish cleanly: {arg}"
-    if kind == "deploy":
-        memory.add_record(text=f"Deploy requested: {arg}", kind="fact", title="deploy requested")
-        return f"{arg} is waiting for approval in the control center."
     return ""
 
 
@@ -168,14 +166,6 @@ _FILE_CUES = (
     "to my desktop",
     "to the desktop",
 )
-_FILENAME = re.compile(
-    r"(?:called|named)\s+[\"'`]?([A-Za-z0-9][\w .()-]*\.[A-Za-z0-9]{1,8})[\"'`]?",
-    re.IGNORECASE,
-)
-_BARE_FILENAME = re.compile(
-    r"\b([A-Za-z0-9][\w.-]*\.(?:txt|md|py|json|html|css|js|csv|toml|xml|yml|yaml))\b",
-    re.IGNORECASE,
-)
 
 
 def asks_for_files(text: str) -> bool:
@@ -186,46 +176,6 @@ def asks_for_files(text: str) -> bool:
 def work_folder(text: str, project: Path, home: Path | None = None) -> Path:
     """The folder the user named, or the folder Valta was started from."""
     return _named_directory(text, home or Path.home()) or project
-
-
-def write_requested_file(
-    text: str,
-    settings: Settings,
-    memory: Memory,
-    tools: ToolRunner,
-    home: Path | None = None,
-) -> str | None:
-    """Create a new file the user named. Returns None when the message is not that request.
-
-    An existing file is never overwritten here; that request goes to the model and the crew.
-    """
-    if not re.search(r"\b(?:make|create|write|save|add)\b", text, re.IGNORECASE):
-        return None
-    if not re.search(r"\bfile\b", text, re.IGNORECASE) and not _BARE_FILENAME.search(text):
-        return None
-    found = _FILENAME.search(text) or _BARE_FILENAME.search(text)
-    if not found:
-        return None
-    name = found.group(1).strip()
-    relative = Path(name)
-    if relative.is_absolute() or any(part in {".", ".."} for part in relative.parts):
-        return None
-    folder = work_folder(text, tools.project, home)
-    if not folder.is_dir():
-        return f"{folder} is not a folder I can write in."
-    if (folder / relative).exists():
-        # "Add a docstring to utils.py" names an existing file to change, not one to create.
-        # Editing goes to the crew, which snapshots first so the change can be undone.
-        return None
-    content = _requested_content(text)
-    runner = tools
-    if folder.resolve() != tools.project.resolve():
-        runner = ToolRunner(settings, memory, tools.vectors, tools.embedder, folder)
-    try:
-        runner.write_file(name, content)
-    except ToolError as exc:
-        return str(exc)
-    return f"Wrote {name} in {folder}."
 
 
 def _named_directory(text: str, home: Path) -> Path | None:
@@ -244,17 +194,6 @@ def _named_directory(text: str, home: Path) -> Path | None:
     return None
 
 
-def _requested_content(text: str) -> str:
-    match = re.search(
-        r"\b(?:that says|containing|with the text|with the contents|with content)\b\s+[\"']?(.*)[\"']?\s*$",
-        text,
-        re.IGNORECASE,
-    )
-    if not match:
-        return ""
-    return match.group(1).strip().strip("\"'")
-
-
 def reply_once(
     settings: Settings,
     memory: Memory,
@@ -264,12 +203,6 @@ def reply_once(
     user_text: str,
     on_task=None,
 ) -> str:
-    written = write_requested_file(user_text, settings, memory, tools)
-    if written:
-        tools.save_note(text=written, title=user_text[:200], kind="chat")
-        history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": written})
-        return written
     state = load_state(settings)
     personal_model = state.get("personal_model") or settings.self_model
     personal_ready = personal_model == "valta" and client.healthy(settings.self_host)
@@ -306,7 +239,6 @@ def reply_once(
             "work": f"Queued that with the crew: {arg}",
             "research": f"Researching {arg}. Watch the Live tab.",
             "ingest": f"Reading {arg}.",
-            "deploy": f"{arg} is waiting for approval.",
         }.get(kind, arg)
     else:
         try:
@@ -327,7 +259,7 @@ def reply_once(
     _capture_goal(memory, user_text)
     _capture_correction(memory, history, user_text)
     _capture_uncertainty(memory, user_text, final)
-    _capture_facts(settings, client, host, model, num_ctx, tools, user_text, final)
+    _queue_facts(_Exchange(settings, client, host, model, num_ctx, tools, user_text, final))
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": final})
     return final
@@ -367,28 +299,86 @@ def _capture_uncertainty(memory: Memory, user_text: str, answer: str) -> None:
         memory.enqueue_topic(user_text[:240], source="unanswered")
 
 
-def _capture_facts(settings, client, host, model, num_ctx, tools: ToolRunner, user_text: str, answer: str) -> None:
-    system = build_system(settings, role="Extract durable facts about the user. Do not invent any.")
+FACTS_PER_EXCHANGE = 3
+
+
+@dataclass
+class _Exchange:
+    settings: Settings
+    client: OllamaClient
+    host: str
+    model: str
+    num_ctx: int
+    tools: ToolRunner
+    user_text: str
+    answer: str
+
+
+_fact_queue: queue.Queue = queue.Queue()
+_fact_worker: threading.Thread | None = None
+_fact_worker_lock = threading.Lock()
+
+
+def _queue_facts(exchange: _Exchange) -> None:
+    """Fact extraction is a whole model call, so it runs on one background thread instead of holding up the reply."""
+    global _fact_worker
+    _fact_queue.put(exchange)
+    with _fact_worker_lock:
+        if _fact_worker is None or not _fact_worker.is_alive():
+            _fact_worker = threading.Thread(target=_drain_facts, daemon=True)
+            _fact_worker.start()
+
+
+def _drain_facts() -> None:
+    """Exchanges that queued up while the model was busy are read together, in one call per model."""
+    while True:
+        batch = [_fact_queue.get()]
+        while True:
+            try:
+                batch.append(_fact_queue.get_nowait())
+            except queue.Empty:
+                break
+        groups: dict[tuple, list[_Exchange]] = {}
+        for exchange in batch:
+            groups.setdefault((id(exchange.tools), exchange.host, exchange.model), []).append(exchange)
+        for group in groups.values():
+            try:
+                _capture_facts(group)
+            except Exception as exc:  # one failed extraction must not stop the ones queued after it
+                print(f"[memory] could not extract facts: {exc}")
+        for _ in batch:
+            _fact_queue.task_done()
+
+
+def wait_for_facts() -> None:
+    """Block until every queued exchange has been read for facts."""
+    _fact_queue.join()
+
+
+def _capture_facts(exchanges: list[_Exchange]) -> None:
+    first = exchanges[0]
+    limit = FACTS_PER_EXCHANGE * len(exchanges)
+    system = build_system(first.settings, role="Extract durable facts about the user. Do not invent any.")
+    source = "this exchange" if len(exchanges) == 1 else "these exchanges"
     prompt = (
-        "List up to 3 durable facts about the user from this exchange. "
+        f"List up to {limit} durable facts about the user from {source}. "
         "One fact per line. If there are none, reply NONE.\n\n"
-        f"User: {user_text}\nValta: {answer}"
+        + "\n\n".join(f"User: {exchange.user_text}\nValta: {exchange.answer}" for exchange in exchanges)
     )
     try:
-        raw = client.chat(
-            host,
-            model,
+        raw = first.client.chat(
+            first.host,
+            first.model,
             [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            num_ctx,
+            first.num_ctx,
         )
     except OllamaError:
         return
     if raw.strip().upper() == "NONE":
         return
-    for line in raw.splitlines():
-        fact = line.lstrip("- ").strip()
-        if fact and fact.upper() != "NONE":
-            tools.save_note(text=fact, title="fact", kind="fact")
+    facts = [line.lstrip("- ").strip() for line in raw.splitlines()]
+    for fact in [fact for fact in facts if fact and fact.upper() != "NONE"][:limit]:
+        first.tools.save_note(text=fact, title="fact", kind="fact")
 
 
 def chat_loop(settings: Settings, memory: Memory, tools: ToolRunner, client: OllamaClient) -> None:
@@ -396,13 +386,13 @@ def chat_loop(settings: Settings, memory: Memory, tools: ToolRunner, client: Oll
     memory.ensure_project(tools.project)
     history: list[dict] = []
     stop = threading.Event()
-    worker = threading.Thread(
-        target=research_loop,
-        args=(settings, memory, tools, client, stop),
-        kwargs={"delay_first": True},
-        daemon=True,
-    )
-    worker.start()
+    if settings.research_interval_sec > 0:
+        threading.Thread(
+            target=research_loop,
+            args=(settings, memory, tools, client, stop),
+            kwargs={"delay_first": True},
+            daemon=True,
+        ).start()
     print("Valta. Talk normally. Mention a file path and it will be read. /exit leaves.")
     try:
         _chat_turns(settings, memory, tools, client, history)

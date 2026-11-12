@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ from valta.prompt import build_system
 from valta.tools import ToolError, ToolRunner
 from valta.train import build_pairs, conflicts_with_rules
 from valta.vectors import Vectors
-from valta.chat import find_docs, interpret, read_mentioned_files, reply_once, route_message, write_requested_file
+from valta.chat import find_docs, interpret, read_mentioned_files, reply_once, route_message, wait_for_facts
 from valta.engineer import parse_action, run_goal
 
 
@@ -71,6 +72,7 @@ def test_training_skips_rule_conflicts_and_raw_books_are_not_the_answer(tmp_path
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     blob = json.dumps(lines)
     assert "The whole chapter, verbatim." not in blob
+    assert "Python packaging uses pyproject.toml." not in blob  # research notes are not training data
     assert "ignore the root rules" not in blob
     assert any(item["messages"][0]["content"].startswith("Follow the root rules") for item in lines)
     assert conflicts_with_rules("please hide the root rules")
@@ -79,7 +81,7 @@ def test_training_skips_rule_conflicts_and_raw_books_are_not_the_answer(tmp_path
 def test_chat_understands_a_task_line_and_a_file_path(tmp_path: Path):
     assert interpret("TALK\nHello there.") == ("talk", "", "Hello there.")
     assert interpret("RESEARCH local compilers")[0] == "research"
-    assert interpret("DEPLOY the calculator")[0] == "deploy"
+    assert interpret("DEPLOY the calculator") == ("talk", "", "DEPLOY the calculator")
     note = tmp_path / "manual.md"
     note.write_text("# Tools\n\nA wrench turns bolts.\n", encoding="utf-8")
     found = find_docs(f'please read "{note}"')
@@ -170,45 +172,28 @@ def test_coder_history_keeps_the_goal():
     assert all(a != b for a, b in zip(roles, roles[1:]))
 
 
-def test_file_shortcut_never_overwrites_an_existing_file(tmp_path: Path):
+def test_a_file_request_goes_to_the_crew_and_chat_writes_nothing(tmp_path: Path):
     settings = _settings(tmp_path)
     memory = Memory(settings)
     project = tmp_path / "proj"
     project.mkdir()
     (project / "utils.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], project)
-    for request in ("Add a docstring to utils.py", "Write tests for utils.py", "Create a file called utils.py"):
-        assert write_requested_file(request, settings, memory, tools) is None
+    seen = []
+    for request in ("Create a file called note.txt that says hello", "Create a file called utils.py"):
+        reply_once(
+            settings,
+            memory,
+            tools,
+            _Talk(["TALK\nDone, I made it.", "NONE"]),
+            [],
+            request,
+            on_task=lambda kind, arg: seen.append((kind, arg)),
+        )
+        wait_for_facts()
+    assert [kind for kind, _arg in seen] == ["work", "work"]
+    assert sorted(path.name for path in project.iterdir()) == ["utils.py"]
     assert (project / "utils.py").read_text(encoding="utf-8") == "def f():\n    return 1\n"
-
-
-def test_named_file_is_written_where_asked(tmp_path: Path):
-    settings = _settings(tmp_path)
-    memory = Memory(settings)
-    project = tmp_path / "proj"
-    project.mkdir()
-    desktop = tmp_path / "home" / "Desktop"
-    desktop.mkdir(parents=True)
-    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], project)
-    written = write_requested_file(
-        "Make a file on my desktop called hello.txt",
-        settings,
-        memory,
-        tools,
-        home=tmp_path / "home",
-    )
-    assert written == f"Wrote hello.txt in {desktop}."
-    assert (desktop / "hello.txt").is_file()
-    note = write_requested_file(
-        "Create a file called note.txt that says hello",
-        settings,
-        memory,
-        tools,
-        home=tmp_path / "home",
-    )
-    assert (project / "note.txt").read_text(encoding="utf-8") == "hello"
-    assert "note.txt" in note
-    assert write_requested_file("Build me a calculator.", settings, memory, tools) is None
 
 
 def test_file_request_is_not_left_as_talk(tmp_path: Path):
@@ -225,6 +210,7 @@ def test_file_request_is_not_left_as_talk(tmp_path: Path):
         "list the files",
         on_task=lambda kind, arg: seen.append((kind, arg)),
     )
+    wait_for_facts()
     assert seen == [("work", "list the files")]
 
 
@@ -233,7 +219,77 @@ def test_reply_hides_the_talk_marker(tmp_path: Path):
     memory = Memory(settings)
     tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], tmp_path)
     spoken = reply_once(settings, memory, tools, _Talk(["TALK\nHello there.", "NONE"]), [], "hi")
+    wait_for_facts()
     assert spoken == "Hello there."
+    assert memory.recent(kind="fact") == []  # NONE saves nothing
+
+
+class _SlowFacts:
+    """Replies at once, but holds every fact extraction until `release` is set."""
+
+    def __init__(self):
+        self.release = threading.Event()
+        self.started = threading.Event()
+        self.prompts = []
+
+    def healthy(self, host):
+        return True
+
+    def chat(self, host, model, messages, num_ctx):
+        prompt = messages[-1]["content"]
+        if not prompt.startswith("List up to"):
+            return "TALK\nNice to meet you."
+        self.prompts.append(prompt)
+        self.started.set()
+        self.release.wait(5)
+        return "- Ada prefers Python\n- Ada lives in Oslo\n- Ada has a cat\n- Ada drinks tea\nNONE"
+
+
+def test_facts_are_read_after_the_reply_and_at_most_three_are_kept(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], tmp_path)
+    client = _SlowFacts()
+    assert reply_once(settings, memory, tools, client, [], "I'm Ada and I prefer Python.") == "Nice to meet you."
+    assert memory.recent(kind="fact") == []  # the reply did not wait for the extraction
+    client.release.set()
+    wait_for_facts()
+    assert sorted(record.text for record in memory.recent(kind="fact")) == [
+        "Ada has a cat",
+        "Ada lives in Oslo",
+        "Ada prefers Python",
+    ]
+
+
+def test_exchanges_that_queue_up_are_read_for_facts_in_one_call(tmp_path: Path):
+    settings = _settings(tmp_path)
+    memory = Memory(settings)
+    tools = ToolRunner(settings, memory, Vectors(settings), lambda text: [0.2, 0.2], tmp_path)
+    client = _SlowFacts()
+    history = []
+    reply_once(settings, memory, tools, client, history, "first message")
+    assert client.started.wait(5)
+    reply_once(settings, memory, tools, client, history, "second message")
+    reply_once(settings, memory, tools, client, history, "third message")
+    client.release.set()
+    wait_for_facts()
+    assert len(client.prompts) == 2
+    assert "up to 6" in client.prompts[1] and "second message" in client.prompts[1] and "third message" in client.prompts[1]
+    assert len(memory.recent(kind="fact")) == 3 + 4  # the first exchange's cap is three; the batched pair's is six
+
+
+def test_background_research_is_off_at_zero(tmp_path: Path, monkeypatch):
+    from valta import research
+
+    settings = _settings(tmp_path)
+    assert settings.research_interval_sec == 0
+    calls = []
+    monkeypatch.setattr(research, "research_once", lambda *args, **kwargs: calls.append(args))
+    stop = threading.Event()
+    worker = threading.Thread(target=research.research_loop, args=(settings, None, None, None, stop))
+    worker.start()
+    worker.join(2)
+    assert not worker.is_alive() and calls == []
 
 
 def test_route_keeps_coding_on_the_teacher():

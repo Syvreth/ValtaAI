@@ -1,5 +1,6 @@
 # Python
 .venv/
+.venv-eval/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -50,6 +51,7 @@ data/adapters/
 data/merged/
 data/models/
 data/datasets/
+data/evalplus/
 data/releases/
 data/state.json
 data/library/*

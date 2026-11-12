@@ -14,6 +14,7 @@ from valta.engineer import run_goal
 
 SKIP_DIRS = {
     ".venv",
+    ".venv-eval",
     "venv",
     ".git",
     "data",
@@ -73,15 +74,11 @@ class JobManager:
             id=uuid.uuid4().hex[:8],
             kind=kind,
             goal=goal,
-            sensitive=kind == "deploy" or (kind == "work" and self._touches_valta(goal, target)),
+            sensitive=kind == "work" and self._touches_valta(goal, target),
             project=target,
         )
         with self._lock:
-            if kind == "deploy":
-                job.status = "awaiting approval"
-                self.approvals.append(job)
-            else:
-                self.jobs.append(job)
+            self.jobs.append(job)
         self._wake.set()
         return job
 

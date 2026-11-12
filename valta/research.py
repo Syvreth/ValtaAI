@@ -125,6 +125,8 @@ def research_loop(
     stop,
     delay_first: bool = False,
 ) -> None:
+    if settings.research_interval_sec <= 0:
+        return  # 0 turns background research off; a wait of 0 would research nonstop
     if delay_first and stop.wait(settings.research_interval_sec):
         return
     while not stop.is_set():

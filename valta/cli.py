@@ -20,6 +20,7 @@ from valta.research import research_once
 from valta.status import project_status
 from valta.tools import ToolRunner
 from valta.evals import run_eval
+from valta.plus_eval import DATASETS, EvalPlusMissing, plus_history, run_plus
 from valta.train import (
     baseline_model,
     build_pairs,
@@ -90,7 +91,7 @@ def chat():
 
 @app.command("live")
 def live_cmd():
-    """Open the control center. Research continues in the background."""
+    """Open the control center. Background research runs when research_interval_sec is above 0."""
     _open_ui()
 
 
@@ -330,12 +331,29 @@ def dataset_remove(name: str = typer.Argument(..., help="The name shown by `valt
 
 @app.command("eval")
 def eval_cmd(
-    model: str = typer.Option("", "--model", help="Model name. Defaults to the active personal model."),
+    model: str = typer.Option(
+        "", "--model", help="Model name. Defaults to the active personal model, or to the teacher with --plus."
+    ),
     teacher: bool = typer.Option(False, "--teacher", help="Score the teacher on the RX 6600 server instead."),
+    plus: bool = typer.Option(
+        False, "--plus", help="HumanEval+ through EvalPlus (164 tasks), on the RX 6600 server. Results go to data/evalplus/."
+    ),
+    mbpp: bool = typer.Option(False, "--mbpp", help="With --plus, MBPP+ (378 tasks) instead of HumanEval+."),
+    personal: bool = typer.Option(
+        False, "--personal", help="With --plus, use the GTX 1660 server instead. Not while it is training."
+    ),
 ):
-    """Score a model on the built-in coding eval (plus any tasks in data/evals/)."""
+    """Score a model on the built-in coding eval (plus any tasks in data/evals/), or on HumanEval+ with --plus."""
     settings = load_settings()
     client = OllamaClient(settings)
+    if mbpp or personal:
+        if not plus:
+            raise typer.BadParameter("--mbpp and --personal go with --plus.")
+        if personal and teacher:
+            raise typer.BadParameter("Choose --teacher or --personal, not both.")
+    if plus:
+        _eval_plus(settings, client, model, "mbpp" if mbpp else "humaneval", personal)
+        return
     host = settings.heavy_host if teacher else settings.self_host
     name = model or (settings.teacher_model if teacher else baseline_model(settings))
     if not client.healthy(host):
@@ -349,6 +367,40 @@ def eval_cmd(
     except OllamaError as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(result.summary())
+
+
+def _eval_plus(settings, client, model: str, dataset: str, personal: bool) -> None:
+    """HumanEval+ or MBPP+ on the teacher's server. The GTX 1660 only when asked, since it may be training."""
+    if personal:
+        host, num_ctx, name = settings.self_host, settings.self_num_ctx, model or baseline_model(settings)
+    else:
+        host, num_ctx, name = settings.heavy_host, settings.teacher_num_ctx, model or settings.teacher_model
+    if not client.healthy(host):
+        raise typer.BadParameter(f"The server at {host} is down. Run scripts/start-ollama.ps1.")
+    try:
+        installed = {tag.get("name") for tag in client.tags(host)}
+    except Exception as exc:
+        raise typer.BadParameter(f"Could not list the models on {host}: {exc}") from exc
+    if name not in installed and f"{name}:latest" not in installed:
+        raise typer.BadParameter(f"{name} is not on {host}. Pull it first: ollama pull {name}")
+    typer.echo(f"{DATASETS[dataset]} for {name} on {host}. Each reply is written first, then EvalPlus scores them all.")
+
+    def show(index: int, total: int, task_id: str, note: str) -> None:
+        typer.echo(f"  [{index:>3}/{total}] {task_id}" + (f"  ({note})" if note else ""))
+
+    try:
+        result = run_plus(settings, client, host, name, dataset, num_ctx=num_ctx, on_progress=show)
+    except (EvalPlusMissing, OllamaError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(result.summary())
+    typer.echo(f"Replies and verdicts: {result.folder}")
+    earlier = plus_history(settings, dataset)[:-1][-5:]
+    if earlier:
+        typer.echo(f"Earlier {DATASETS[dataset]} runs:")
+        for row in earlier:
+            total = row.get("total") or 0
+            share = f"{row.get('plus', 0) / total:.1%}" if total else "-"
+            typer.echo(f"  {str(row.get('time', ''))[:16]}  {row.get('model')}  {row.get('plus')}/{total} ({share})")
 
 
 @app.command()

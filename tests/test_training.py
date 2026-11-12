@@ -256,32 +256,6 @@ def test_ollama_create_uploads_a_local_gguf_and_names_it_in_files(tmp_path: Path
     assert sent["create"]["from"] == "qwen2.5-coder:3b" and "files" not in sent["create"]
 
 
-def test_research_notes_are_one_per_topic_capped_and_unlabelled():
-    from valta.memory import Record
-    from valta.train import RESEARCH_MAX_PAIRS, clean_note, research_pairs
-
-    def note(title, text):
-        return Record(id=title + text, kind="research", title=title, text=text, url=None, source=None, created_at="")
-
-    newest_first = [
-        note("Local Voice Assistant", "**Note:**\n\nNewest summary."),
-        note("Local Voice Assistant", "**Note for Companion:** Older summary."),
-        note("local voice  assistant", "Same topic, other spacing."),
-        note("", "No title."),
-        note("Ajagara", "Note: A python."),
-    ]
-    assert research_pairs(newest_first) == [("Local Voice Assistant", "Newest summary."), ("Ajagara", "A python.")]
-    many = [note(f"topic {i}", "text") for i in range(RESEARCH_MAX_PAIRS + 5)]
-    assert len(research_pairs(many)) == RESEARCH_MAX_PAIRS
-    assert clean_note("Notes on Python packaging.") == "Notes on Python packaging."
-    assert clean_note("**Note**: kept text") == "kept text"
-    assert clean_note("**Note on Python:**  Python is a language.") == "Python is a language."
-    assert clean_note("**Note for Valta Companion:**\n\nRun checks.") == "Run checks."
-    assert clean_note("**Python Download Page Note**\n\n- Latest version") == "- Latest version"
-    assert clean_note("**Isolated Workspaces in Paperclip**\nText") == "**Isolated Workspaces in Paperclip**\nText"
-    assert clean_note("A note: this stays.") == "A note: this stays."
-
-
 def test_default_gate_refuses_a_model_that_lost_a_task(tmp_path: Path):
     from valta.evals import EvalResult, should_promote
 

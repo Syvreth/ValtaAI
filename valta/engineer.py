@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from valta.config import Settings
@@ -7,6 +8,7 @@ from valta.control import JobStopped
 from valta.memory import Memory
 from valta.ollama_client import OllamaError
 from valta.prompt import build_system
+from valta.repomap import repo_map
 from valta.tools import ToolError, ToolRunner
 
 ACTION_HELP = """
@@ -24,6 +26,14 @@ ACTION search_memory
 QUERY what you want to recall
 END
 
+ACTION replace
+PATH the/real/file.py
+OLD
+the exact lines to change, copied from the file
+NEW
+the lines that take their place
+END
+
 ACTION write_file
 PATH the/real/file.py
 CONTENT
@@ -38,8 +48,10 @@ ACTION done
 SUMMARY what you changed
 END
 
+To change a file that exists, read it first, then use ACTION replace with lines copied exactly from it, indentation included. OLD must appear once in the file.
+Use ACTION write_file to create a file, or to rewrite one that is short (under about 80 lines).
 Do not edit the root rules. Do not delete files. Do not push git. Stay inside the project folder.
-You can read and write files there. When the goal asks for a file, use ACTION write_file. Do not refuse.
+You can read and write files there. When the goal asks for a file, make it. Do not refuse.
 Never copy the sample PATH relative/path or the sample QUERY. Use a real project path.
 """.strip()
 
@@ -52,6 +64,8 @@ class Action:
     command: str = ""
     query: str = ""
     summary: str = ""
+    old: str = ""
+    new: str = ""
 
 
 def parse_action(text: str) -> Action | None:
@@ -62,12 +76,16 @@ def parse_action(text: str) -> Action | None:
     body = text[start + len(marker) :]
     name, _, rest = body.partition("\n")
     name = name.strip().lower()
-    if name not in {"read_file", "list_directory", "search_memory", "write_file", "run_tests", "done", "ingest", "research", "work"}:
+    if name not in {
+        "read_file", "list_directory", "search_memory", "replace", "write_file", "run_tests", "done", "ingest", "research", "work"
+    }:
         return None
     if name == "done":
         return Action(name="done", summary=_section(rest, "SUMMARY"))
     if name == "write_file":
         return Action(name=name, path=_section(rest, "PATH"), content=_section(rest, "CONTENT"))
+    if name == "replace":
+        return Action(name=name, path=_section(rest, "PATH"), old=_block(rest, "OLD", "NEW"), new=_block(rest, "NEW"))
     if name == "run_tests":
         return Action(name=name, command=_section(rest, "CMD") or "python -m pytest -q")
     if name == "search_memory":
@@ -103,6 +121,31 @@ def _section(text: str, label: str) -> str:
     return "\n".join(found).strip()
 
 
+def _block(text: str, label: str, stop: str = "END") -> str:
+    """The lines between a LABEL line and the next `stop` (or END) line, indentation kept.
+
+    Only blank lines at either end are dropped: OLD has to match the file exactly.
+    """
+    found: list[str] | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if found is None:
+            if stripped == label:
+                found = []
+            elif line.startswith(label + " "):
+                found = [line[len(label) + 1 :]]
+            continue
+        if stripped in {stop, "END"}:
+            break
+        found.append(line)
+    lines = found or []
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
 def _emit(on_event, agent: str, text: str) -> None:
     if on_event is not None:
         on_event(agent, text)
@@ -132,12 +175,11 @@ def run_goal(
     memory.ensure_project(tools.project)
     memory.add_goal(goal)
     lessons = _lesson_text(tools, goal)
-    listing = _safe_list(tools)
     _checkpoint(control)
-    planner_input = f"Goal:\n{goal}\n\nProject files:\n{listing}\n\nLessons:\n{lessons}"
+    planner_input = f"Goal:\n{goal}\n\nProject map:\n{_project_map(tools)}\n\nLessons:\n{lessons}"
     plan = _ask(settings, client, role=PLANNER_ROLE, user=planner_input)
     _emit(on_event, "planner", plan)
-    feedback = "Carry out the plan. Use one ACTION at a time."
+    feedback = "Carry out the plan, one tool call at a time." if settings.native_tools else "Carry out the plan. Use one ACTION at a time."
     summary = ""
     test_output = ""
     passed = False
@@ -162,7 +204,7 @@ def run_goal(
             _emit(on_event, "tester", test_output)
             if not wrote:
                 passed = False
-                feedback = "No file was written. Use ACTION write_file with a real path and the full file text, then ACTION done."
+                feedback = NOTHING_CHANGED + " Then finish with done."
             elif _tests_passed(test_output):
                 verdict = _ask(
                     settings,
@@ -234,7 +276,8 @@ def _save_transcript(settings, memory, tools, goal, status, planner_input, plan,
     """Every message of every round, untrimmed, so the coder can later be trained on how it worked."""
     body = {
         "planner": {"system": PLANNER_ROLE, "user": planner_input, "plan": plan},
-        "coder_system": CODER_ROLE,
+        "coder_system": CODER_TOOLS_ROLE if settings.native_tools else CODER_ROLE,
+        "coder_tools": CODER_TOOLS if settings.native_tools else None,
         "reviewer_system": REVIEWER_ROLE,
         "rounds": rounds,
     }
@@ -257,42 +300,135 @@ def _save_repair_preferences(memory, goal: str, failed_attempts: list[dict[str, 
 
 PLANNER_ROLE = "You are the planner. Write a short plan. Do not edit files."
 CODER_ROLE = (
-    "You are the coder. You can read and write files inside the project. When the goal asks for a file, "
-    "use ACTION write_file. Do not refuse. Follow the action format. Never use the sample path relative/path."
+    "You are the coder. You can read and change files inside the project. Change a file that exists with "
+    "ACTION replace, and create a file with ACTION write_file. Do not refuse. Follow the action format. "
+    "Never use the sample path relative/path."
+)
+CODER_TOOLS_ROLE = (
+    "You are the coder. Change files inside the project with your tools, one call at a time. Change a file that "
+    "exists with replace: read it first and copy the old lines exactly, indentation included. Create a file, or "
+    "rewrite a short one (under about 80 lines), with write_file. Call done once the files are changed. "
+    "Do not edit the root rules. Do not delete files. Do not push git. Stay inside the project folder. Do not refuse."
 )
 REVIEWER_ROLE = "You are the reviewer. Reply PASS or FAIL, then one sentence."
+NOTHING_CHANGED = "No file was changed yet. Create a file with write_file, or change one with replace."
+
+
+def _tool(name: str, description: str, optional: tuple[str, ...] = (), **params: str) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {key: {"type": "string", "description": text} for key, text in params.items()},
+                "required": [key for key in params if key not in optional],
+            },
+        },
+    }
+
+
+# The coder's actions as tools for Ollama's tool calling (settings.native_tools).
+CODER_TOOLS = [
+    _tool("read_file", "Read a file in the project.", path="Path relative to the project folder."),
+    _tool("list_directory", "List a folder in the project.", optional=("path",), path="Folder; . is the project folder."),
+    _tool("search_memory", "Search Valta's memory: lessons, notes and facts.", query="What to look for."),
+    _tool(
+        "replace",
+        "Change a file that exists: swap one block for new text. old must be copied exactly from the file and appear once.",
+        path="Path relative to the project folder.",
+        old="The exact lines to change, copied from the file.",
+        new="The lines that take their place.",
+    ),
+    _tool(
+        "write_file",
+        "Create a file, or rewrite a short one, with its full text.",
+        path="Path relative to the project folder.",
+        content="The full file text.",
+    ),
+    _tool(
+        "run_tests",
+        "Run the tests. Allowed: python -m pytest and python -m compileall.",
+        optional=("command",),
+        command="For example: python -m pytest -q",
+    ),
+    _tool("done", "Finish, once the files are changed.", summary="What you changed."),
+]
+
+
+def tool_action(message: dict) -> Action | None:
+    """The first tool call in a reply as an Action, or an ACTION block in its text when the model wrote one instead."""
+    calls = message.get("tool_calls") or []
+    if not calls:
+        return parse_action(message.get("content") or "")
+    function = calls[0].get("function") or {}
+    args = function.get("arguments") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+
+    def get(key: str) -> str:
+        return "" if args.get(key) is None else str(args[key])
+
+    name = str(function.get("name") or "")
+    if name in {"read_file", "list_directory"}:
+        return Action(name=name, path=get("path") or ("." if name == "list_directory" else ""))
+    if name == "search_memory":
+        return Action(name=name, query=get("query"))
+    if name == "replace":
+        return Action(name=name, path=get("path"), old=get("old"), new=get("new"))
+    if name == "write_file":
+        return Action(name=name, path=get("path"), content=get("content"))
+    if name == "run_tests":
+        return Action(name=name, command=get("command") or "python -m pytest -q")
+    if name == "done":
+        return Action(name=name, summary=get("summary"))
+    return None
 
 
 def _coder_round(
     settings, client, tools, goal, plan, feedback, on_event=None, control=None, writes=None, transcript=None
 ) -> tuple[str, bool]:
     """One coder pass. `transcript`, when given, receives every message untrimmed, in order."""
-    history = [{"role": "user", "content": f"Goal:\n{goal}\n\nPlan:\n{plan}\n\n{feedback}\n\n{ACTION_HELP}"}]
+    native = settings.native_tools
+    opening = f"Goal:\n{goal}\n\nPlan:\n{plan}\n\nProject map:\n{_project_map(tools)}\n\n{feedback}"
+    if not native:
+        opening += f"\n\n{ACTION_HELP}"
+    history = [{"role": "user", "content": opening}]
     if transcript is not None:
         transcript.append(history[0])
     summary = ""
     wrote = False
     for _step in range(settings.work_max_steps):
         _checkpoint(control)
-        reply = _ask(
-            settings,
-            client,
-            role=CODER_ROLE,
-            user="",
-            history=history,
-        )
-        action = parse_action(reply)
+        if native:
+            reply = _ask_tools(settings, client, history)
+            action = tool_action(reply)
+            if action is None and wrote and not reply["tool_calls"] and reply["content"].strip():
+                action = Action(name="done", summary=reply["content"].strip())  # a tool-calling model ends in prose
+            if reply["tool_calls"]:
+                reply = {**reply, "tool_calls": reply["tool_calls"][:1]}  # one call per turn, one result each
+            else:
+                reply = {"role": "assistant", "content": reply["content"]}
+        else:
+            text = _ask(settings, client, role=CODER_ROLE, user="", history=history)
+            reply, action = {"role": "assistant", "content": text}, parse_action(text)
         if action is None:
-            result = "That was not an action. " + ACTION_HELP
+            result = "That was not one of your tools. Call one." if native else "That was not an action. " + ACTION_HELP
         elif action.name == "done":
             if not wrote:
-                result = "No file was written. Use ACTION write_file with a real PATH and the full file text."
+                result = NOTHING_CHANGED
                 _emit(on_event, "coder", result)
             else:
                 summary = action.summary or "Finished the edit pass."
                 _emit(on_event, "coder", summary)
                 if transcript is not None:
-                    transcript.append({"role": "assistant", "content": reply})
+                    transcript.append(reply)
                 return summary, True
         else:
             rejected = _example_action(action)
@@ -300,18 +436,23 @@ def _coder_round(
                 result = rejected
             else:
                 result = _execute(tools, action)
-                if action.name == "write_file" and str(result).startswith("Wrote "):
+                if str(result).startswith(("Wrote ", "Replaced ")):
                     wrote = True
                     if writes is not None:
-                        writes[action.path] = action.content
+                        writes[action.path] = action.content if action.name == "write_file" else tools.read_file(action.path)
             detail = action.path or action.command or action.query or action.name
             _emit(on_event, "coder", f"{action.name} {detail}\n{result}")
-        exchange = [{"role": "assistant", "content": reply}, {"role": "user", "content": str(result)}]
+        if reply.get("tool_calls"):
+            called = (reply["tool_calls"][0].get("function") or {}).get("name", "")
+            answer = {"role": "tool", "content": str(result), "tool_name": called}
+        else:
+            answer = {"role": "user", "content": str(result)}
+        exchange = [reply, answer]
         history.extend(exchange)
         if transcript is not None:
             transcript.extend(exchange)
         history = _trim_history(history)
-    return summary or "Stopped at the step limit before ACTION done.", wrote
+    return summary or "Stopped at the step limit before the coder said it was done.", wrote
 
 
 CODER_RECENT_TURNS = 3
@@ -331,12 +472,14 @@ def _trim_history(history: list[dict]) -> list[dict]:
 
 def _example_action(action: Action) -> str | None:
     path = action.path.replace("\\", "/")
-    if action.name in {"read_file", "write_file"} and path in {"relative/path", "the/real/file.py"}:
-        return "That PATH is the sample from the instructions. Use a real project file, such as valta/status.py."
+    if action.name in {"read_file", "write_file", "replace"} and path in {"relative/path", "the/real/file.py"}:
+        return "That PATH is the sample from the instructions. Use a real file from the project map."
     if action.name == "search_memory" and action.query.strip() == "what you want to recall":
         return "That QUERY is the sample from the instructions. Write the file, or search for a real topic."
     if action.name == "write_file" and action.content.strip() in {"", "file contents", "the full file text"}:
         return "That CONTENT is the sample from the instructions. Put the real file text after CONTENT."
+    if action.name == "replace" and action.old.strip() in {"", "the exact lines to change, copied from the file"}:
+        return "That OLD is the sample from the instructions. Read the file, then copy the exact lines to change."
     return None
 
 
@@ -353,6 +496,10 @@ def _execute(tools: ToolRunner, action: Action) -> str:
             if not action.path:
                 return "PATH is required."
             return tools.write_file(action.path, action.content)
+        if action.name == "replace":
+            if not action.path:
+                return "PATH is required."
+            return tools.replace_text(action.path, action.old, action.new)
         if action.name == "run_tests":
             return tools.run_tests(action.command)
     except ToolError as exc:
@@ -384,12 +531,18 @@ def _lesson_text(tools: ToolRunner, goal: str) -> str:
     return "\n\n".join(record.text for record in records)
 
 
-def _safe_list(tools: ToolRunner) -> str:
+def _project_map(tools: ToolRunner) -> str:
     try:
-        names = tools.list_directory(".")
-    except ToolError as exc:
-        return str(exc)
-    return "\n".join(names[:80])
+        return repo_map(tools.project)
+    except OSError as exc:
+        return f"Could not map the project: {exc}"
+
+
+def _ask_tools(settings: Settings, client, history: list) -> dict:
+    messages = [{"role": "system", "content": build_system(settings, role=CODER_TOOLS_ROLE)}, *history]
+    return client.chat_with_tools(
+        settings.heavy_host, settings.teacher_model, messages, settings.teacher_num_ctx, CODER_TOOLS
+    )
 
 
 def _ask(settings: Settings, client, role: str, user: str, history: list | None = None) -> str:

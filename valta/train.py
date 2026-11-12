@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,9 +65,6 @@ def build_pairs(
         add(row["user_text"], row["assistant_text"])
         example_ids.append(row["id"])
 
-    for title, text in research_pairs(memory.recent(limit=200, kind="research")):
-        add(f"What did you learn about {title}?", text)
-
     external = 0
     external_limit = settings.external_max_pairs
     if max_examples > 0:
@@ -95,7 +91,7 @@ def build_pairs(
                 add(drafted[0], drafted[1])
 
     if not pairs:
-        raise RuntimeError("Nothing to train on yet. Ingest notes, research, or correct a reply first.")
+        raise RuntimeError("Nothing to train on yet. Correct a reply, let a job pass, or run `valta practice` first.")
 
     settings.datasets_dir.mkdir(parents=True, exist_ok=True)
     path = settings.datasets_dir / "train.jsonl"
@@ -107,45 +103,6 @@ def build_pairs(
     from_datasets = f", {external} of them from imported datasets" if external else ""
     print(f"Wrote {len(pairs)} training pairs to {path}{from_datasets}{note}")
     return path, example_ids
-
-
-# Research notes are background reading, not corrections or verified work. A cap keeps them from
-# outnumbering the examples that matter.
-RESEARCH_MAX_PAIRS = 20
-# "**Note:**", "Note for Valta Companion:", "**Note on Python:**" at the very start of a note.
-_NOTE_LABEL = re.compile(
-    r"^\s*(?:\*\*)?\s*note(?:\s+(?:for|on|about)\s+[^:*\n]{1,40})?\s*(?::\s*\*\*|\*\*\s*:|:)\s*",
-    re.IGNORECASE,
-)
-# A first line that is only a bold heading with "note" in it, such as "**Python Download Page Note**".
-_NOTE_HEADING = re.compile(r"^\s*\*\*[^*\n]{0,60}\bnotes?\b[^*\n]{0,60}\*\*\s*:?[ \t]*(?:\n|$)", re.IGNORECASE)
-
-
-def clean_note(text: str) -> str:
-    """Drop a leading "**Note:**" style label, so the model does not learn to open every answer with one."""
-    text = _NOTE_HEADING.sub("", text, count=1)
-    return _NOTE_LABEL.sub("", text, count=1).strip()
-
-
-def research_pairs(records) -> list[tuple[str, str]]:
-    """One (title, text) per research topic, newest note first, at most RESEARCH_MAX_PAIRS.
-
-    Research runs revisit the same topic, and five different answers to one question teach the
-    model nothing but the shape of an answer. `records` is expected newest first.
-    """
-    seen: set[str] = set()
-    pairs: list[tuple[str, str]] = []
-    for record in records:
-        title = " ".join((record.title or "").split())
-        key = title.lower()
-        text = clean_note(record.text)
-        if not title or not text or key in seen:
-            continue
-        seen.add(key)
-        pairs.append((title, text))
-        if len(pairs) >= RESEARCH_MAX_PAIRS:
-            break
-    return pairs
 
 
 def document_passages(memory: Memory, limit: int):

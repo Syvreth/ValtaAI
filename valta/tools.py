@@ -41,6 +41,7 @@ class ToolRunner:
             "read_file": self.read_file,
             "list_directory": self.list_directory,
             "write_file": self.write_file,
+            "replace_text": self.replace_text,
             "run_tests": self.run_tests,
         }
         if name not in tools:
@@ -108,6 +109,31 @@ class ToolRunner:
         resolved.write_text(content, encoding="utf-8")
         return f"Wrote {resolved.relative_to(self.project)}"
 
+    def replace_text(self, path: str, old: str, new: str) -> str:
+        """Swap one block of an existing file. `old` must appear exactly once; the file's line endings are kept."""
+        resolved = self._inside_project(Path(path))
+        self.refuse_rules_mutation(resolved)
+        if self._protected(resolved):
+            raise ToolError("That path is protected. Root rules, memory, and the virtualenv stay as they are.")
+        if not resolved.is_file():
+            raise ToolError(f"Not a file: {path}. Use write_file to create it.")
+        old, new = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
+        if not old.strip():
+            raise ToolError("OLD is empty. Copy the exact lines to change from the file.")
+        try:
+            text = resolved.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ToolError(f"{path} is not UTF-8 text, so it cannot be edited in place.") from exc
+        newline = "\r\n" if "\r\n" in text else "\n"
+        body = text.replace("\r\n", "\n")
+        found = body.count(old)
+        if found == 0:
+            raise ToolError(f"OLD was not found in {path}. Copy it exactly from read_file, indentation included.")
+        if found > 1:
+            raise ToolError(f"OLD appears {found} times in {path}. Include more of the lines around it so it matches once.")
+        resolved.write_bytes(body.replace(old, new, 1).replace("\n", newline).encode("utf-8"))
+        return f"Replaced one block in {resolved.relative_to(self.project)}"
+
     def run_tests(self, command: str = "python -m pytest -q") -> str:
         argv = self._allowed_test_command(command)
         try:
@@ -153,7 +179,7 @@ class ToolRunner:
             return True
         if not parts:
             return True
-        if parts[0] in {".venv", ".git"}:
+        if parts[0] in {".venv", ".venv-eval", ".git"}:
             return True
         if self.project.resolve() == self.settings.root.resolve() and parts[0] in {"rules", "data"}:
             return True

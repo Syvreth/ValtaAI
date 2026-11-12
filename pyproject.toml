@@ -24,6 +24,10 @@ train = [
   "accelerate>=1.0",
   "datasets>=3",
 ]
+# `valta eval --plus`. EvalPlus brings its own transformers, datasets and API clients, so it goes in its own
+# venv (.venv-eval), away from the training packages. The 0.3.1 release can never pass HumanEval/32; this
+# commit fixes that. Its build needs SETUPTOOLS_SCM_PRETEND_VERSION set, since the archive has no git history.
+eval = ["evalplus @ https://github.com/evalplus/evalplus/archive/26d6d00bb1fd0fa37f39c99d5290da67891d1c5e.zip"]
 
 [project.scripts]
 valta = "valta.cli:app"

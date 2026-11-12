@@ -38,6 +38,7 @@ class Settings:
     doc_qa_pairs: int = 20
     train_fp32_embeddings: bool = False
     train_gradient_checkpointing: bool = True
+    native_tools: bool = False
 
     @property
     def data(self) -> Path:
@@ -86,6 +87,10 @@ class Settings:
     @property
     def evals_dir(self) -> Path:
         return self.data / "evals"
+
+    @property
+    def evalplus_dir(self) -> Path:
+        return self.data / "evalplus"
 
     def ensure_dirs(self) -> None:
         for path in (
@@ -137,6 +142,7 @@ def load_settings(root: Path | None = None) -> Settings:
         doc_qa_pairs=int(raw.get("doc_qa_pairs", 20)),
         train_fp32_embeddings=bool(raw.get("train_fp32_embeddings", False)),
         train_gradient_checkpointing=bool(raw.get("train_gradient_checkpointing", True)),
+        native_tools=bool(raw.get("native_tools", False)),
     )
     settings.ensure_dirs()
     return settings

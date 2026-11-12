@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -49,22 +50,63 @@ class OllamaClient:
         num_ctx: int,
         temperature: float = 0.4,
     ) -> str:
-        response = httpx.post(
-            f"{host}/api/chat",
-            json={
+        """The model's answer. Thinking is turned off: every caller parses the reply as the answer itself."""
+        message = self._chat_message(
+            host,
+            {
                 "model": model,
                 "messages": messages,
                 "stream": False,
+                "think": False,
                 "options": {"num_ctx": num_ctx, "temperature": temperature},
             },
-            timeout=self.timeout,
         )
-        if response.status_code >= 400:
-            raise OllamaError(f"{host} chat failed ({response.status_code}): {response.text[:400]}")
-        content = response.json().get("message", {}).get("content", "")
-        if not content:
+        content = strip_thinking(message.get("content") or "")
+        if not content.strip():
+            if message.get("thinking"):
+                raise OllamaError(f"{model} on {host} only thought and gave no answer")
             raise OllamaError(f"{host} returned an empty reply from {model}")
         return content
+
+    def chat_with_tools(
+        self,
+        host: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        num_ctx: int,
+        tools: list[dict[str, Any]],
+        temperature: float = 0.4,
+    ) -> dict[str, Any]:
+        """The model's reply as a message: its text and the tool calls it made through Ollama's tool calling."""
+        message = self._chat_message(
+            host,
+            {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "stream": False,
+                "think": False,
+                "options": {"num_ctx": num_ctx, "temperature": temperature},
+            },
+        )
+        content = strip_thinking(message.get("content") or "")
+        calls = list(message.get("tool_calls") or [])
+        if not content.strip() and not calls:
+            raise OllamaError(f"{host} returned neither text nor a tool call from {model}")
+        return {"role": "assistant", "content": content, "tool_calls": calls}
+
+    def _chat_message(self, host: str, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            response = httpx.post(f"{host}/api/chat", json=body, timeout=self.timeout)
+            if response.status_code == 400 and "think" in body and "think" in response.text.lower():
+                # An Ollama that does not take the field for this model: ask again without it.
+                body = {key: value for key, value in body.items() if key != "think"}
+                response = httpx.post(f"{host}/api/chat", json=body, timeout=self.timeout)
+        except httpx.HTTPError as exc:
+            raise OllamaError(f"{host} chat failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise OllamaError(f"{host} chat failed ({response.status_code}): {response.text[:400]}")
+        return response.json().get("message") or {}
 
     def embed(self, host: str, model: str, text: str) -> list[float]:
         response = httpx.post(
@@ -176,6 +218,14 @@ class OllamaClient:
         if response.status_code >= 400:
             raise OllamaError(f"upload {path.name} failed ({response.status_code}): {response.text[:400]}")
         return digest
+
+
+_THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
+
+
+def strip_thinking(content: str) -> str:
+    """Drop a leading <think>...</think> block, for a model that thinks aloud in its answer anyway."""
+    return _THINK_BLOCK.sub("", content, count=1)
 
 
 def _chunks(handle, size: int = 1 << 20):

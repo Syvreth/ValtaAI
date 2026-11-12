@@ -15,7 +15,7 @@
   <img alt="Runs locally" src="https://img.shields.io/badge/runs-on%20your%20machine-5B2C6F?style=flat-square">
 </p>
 
-Valta is a control center for a self-hosted coding companion. You talk to it in plain language. It keeps what it learns, looks things up on its own, and can plan, write, test, and repair a project in the folder you started it from. Sensitive work waits until you approve it.
+Valta is a control center for a self-hosted coding companion. You talk to it in plain language. It keeps what it learns, looks things up, and can plan, write, test, and repair a project in the folder you started it from. Sensitive work waits until you approve it.
 
 Memory, books, fine-tunes, and your private root rules stay on disk. They are not part of this repository.
 
@@ -43,7 +43,7 @@ Chat takes the whole screen. When the crew has work, an Activity panel slides in
 | Changes | Changed files and a colored unified diff. |
 | Memory | Lessons, research notes, and facts already stored. |
 | Models | Which server is up, and which model is loaded. |
-| Approvals | A verified self-improvement, or a deploy, waiting for you. |
+| Approvals | A verified change to Valta's own code, waiting for you. |
 
 The top bar shows whether each model server is up. The line above the prompt shows what the crew is doing right now. The line under the prompt lists only the keys that matter at that moment.
 
@@ -57,13 +57,13 @@ The top bar shows whether each model server is up. The line above the prompt sho
 | Ctrl+P | Pause the running job |
 | Ctrl+R | Resume |
 | Ctrl+X | Stop. Files stay as they are. |
-| Ctrl+A | Keep a verified self-improvement or accept a deploy |
+| Ctrl+A | Keep a verified change to Valta's own code |
 | Ctrl+D | Restore the previous files |
 | Ctrl+Q | Quit |
 
 On a terminal narrower than 100 columns the panel takes the whole screen instead of sharing it. Colors come from `ui_theme` in `config.toml`: `tokyo-night` (default), `nord`, `gruvbox`, `dracula`, `catppuccin-mocha`, `textual-light`, or any other Textual theme. Setting the `VALTA_THEME` environment variable overrides it for one run.
 
-A normal build does not stop for approval. Changing Valta’s own code does, and so does a deploy. Approve keeps the edits in the project. Deny puts the previous files back. Nothing is pushed.
+A normal build does not stop for approval. Changing Valta’s own code does. Approve keeps the edits in the project. Deny puts the previous files back. Nothing is pushed.
 
 ## How a job moves
 
@@ -83,6 +83,10 @@ flowchart LR
     K -->|Approve| J
     K -->|Deny| L[Files restored]
 ```
+
+The planner and the coder both see a map of the project: every file, and for each Python file its line count, classes and functions (test files show how many tests they hold). The map is capped at about 8,000 characters; on a large project, argument lists go first, then outlines. The coder changes a file that exists by replacing one block copied exactly from it, which has to match once, and writes a whole file only to create it or when the file is short.
+
+`native_tools` in `config.toml` chooses how the coder acts. Set to `true`, it calls `read_file`, `list_directory`, `search_memory`, `replace`, `write_file`, `run_tests` and `done` through Ollama's tool calling, one call per turn. Set to `false`, it writes `ACTION` blocks that Valta parses. Valta reads an `ACTION` block in either mode, so a model that slips back into the text format still works. Thinking is turned off on every model call, because Valta reads each reply as the answer itself.
 
 The same root rules are injected ahead of every model call. A role prompt and a retrieved memory do not replace them. Valta will not edit or delete that file, and it will not push git or leave the project folder unless you ask.
 
@@ -184,7 +188,7 @@ Opening `valta` with no command is the control center. The commands below are th
 | `valta memory` | List stored records. |
 | `valta forget <id>` | Delete one record and its vector. |
 | `valta rules` | Print the root rules that are loaded. |
-| `valta eval` | Score a model on the coding eval. `--teacher` scores the 7B instead. |
+| `valta eval` | Score a model on the coding eval. `--teacher` scores the 7B instead. `--plus` runs HumanEval+ on the teacher's server instead, `--plus --mbpp` runs MBPP+. |
 | `valta practice` | The teacher sets coding problems, tests check the answers, and what the 3B gets wrong is saved for training. `--count` sets how many to try, `--train` fine-tunes afterwards. |
 | `valta train` | Build pairs, QLoRA the 3B, score it, and replace `valta` only if it did not get worse. `--skip-eval` promotes without scoring. `--resume` picks up from merged weights. `--rollback` goes back one model. |
 
@@ -194,9 +198,11 @@ From the chat itself, Valta can decide to ingest a path you mention, research a 
 
 SQLite (`data/valta.db`) is the source of truth. Chroma (`data/chroma`) stores vectors for the same records, embedded with `nomic-embed-text`. Kinds are book, web, research, chat, fact, and lesson.
 
-Background research starts with the control center. It waits so your first message gets the GPU, then rotates through a topic queue, `data/interests.txt`, and headings from books you have ingested. Notes keep the source URL.
+Research runs when you ask for it: `valta research`, a request in chat, or `valta learn` for a site you choose. Background research is off by default (`research_interval_sec = 0`), because left running every few minutes it filed near-identical notes on one topic. Set it to a number of seconds to turn it back on: it waits so your first message gets the GPU, then rotates through a topic queue, `data/interests.txt`, and headings from books you have ingested. Notes keep the source URL.
 
-Fine-tuning does not train on raw books. It builds question-and-answer pairs from corrections, verified solutions, research notes, and a small sample of book chunks. Research notes are capped at 20, one per topic (the newest), with any leading "Note:" label removed, so background reading cannot outnumber corrections and verified work. Pairs that conflict with the root rules are dropped. The system text of each pair is the current root rules.
+After each reply, the exchange is queued and read for durable facts about you on a background thread, so the reply does not wait for that extra model call. Exchanges that pile up while the model is busy are read together in one call, and at most three facts are kept per exchange.
+
+Fine-tuning does not train on raw books or research notes. It builds question-and-answer pairs from corrections, verified solutions, practice problems, imported datasets, and a small sample of book and web passages. Research notes stay in memory, where chat and the crew look them up. Pairs that conflict with the root rules are dropped. The system text of each pair is the current root rules.
 
 Two kinds of example are saved as you work:
 
@@ -280,6 +286,30 @@ Limits worth knowing:
 - It measures coding, not personal conversation, which is what the 3B is routed for. It catches regressions. It does not prove the personal model got better at knowing you.
 - Replies are run as Python in a temporary folder with a 10 second timeout and a clean environment. That is not a sandbox, the same trust level as the test runs the crew already does.
 
+### A harder test for choosing a model
+
+Strong models pass all twelve tasks, so the twelve cannot tell two teachers apart. `valta eval --plus` runs [HumanEval+](https://github.com/evalplus/evalplus): 164 tasks, each checked against many more inputs than the original HumanEval. `--mbpp` runs MBPP+ instead, 378 tasks and a much longer run.
+
+EvalPlus brings its own transformers, datasets and API clients, so it gets its own venv, away from the training packages. Install it once. The pinned commit fixes a bug in the 0.3.1 release that fails HumanEval/32 for every model, and its build needs a version number because GitHub's archive has no git history:
+
+```powershell
+py -3.13 -m venv .venv-eval
+$env:SETUPTOOLS_SCM_PRETEND_VERSION = "0.3.2.dev0"
+.\.venv-eval\Scripts\python.exe -m pip install "evalplus @ https://github.com/evalplus/evalplus/archive/26d6d00bb1fd0fa37f39c99d5290da67891d1c5e.zip"
+.\.venv\Scripts\valta.exe eval --plus                           # the teacher in config.toml
+.\.venv\Scripts\valta.exe eval --plus --model qwen2.5-coder:14b  # another model on the same server
+```
+
+Valta runs EvalPlus with the Python in `VALTA_EVALPLUS_PYTHON` when that is set, otherwise `.venv-eval`, otherwise its own venv if EvalPlus is installed there.
+
+- It runs on the teacher's server (port 11434) by default, so it can run while the GTX 1660 trains. `--personal` uses port 11435 instead; leave that until training has finished.
+- Valta asks the model for each task at temperature 0, with the root rules first and EvalPlus's own instruction. EvalPlus then cleans each reply with its sanitizer and runs its base and extra tests, through `scripts/evalplus_run.py`.
+- The headline number is the share of tasks that pass both the base and the extra tests. The base-only share is printed beside it.
+- Each run keeps its replies and EvalPlus's verdicts in `data/evalplus/<time>-<dataset>-<model>/`, and adds one line to `data/evalplus/history.jsonl`. The end of each run lists earlier runs, so models can be compared. These scores never go into `eval_history`, and the promotion gate inside `valta train` still uses the twelve tasks.
+- EvalPlus limits each test input with a Unix timer that Windows does not have, which would fail every task. `scripts/evalplus_run.py` swaps in a timer thread on Windows and turns off EvalPlus's Unix-only memory limit.
+- On Windows with Python 3.13, EvalPlus's own reference answer to HumanEval/32 misses one extra test by a rounding error, so 163 of 164 is the practical top score.
+- Like the twelve-task eval, this runs model-written code on your machine with a timeout. It is not a sandbox.
+
 ## What stays off GitHub
 
 | Stays local | Why |
@@ -287,6 +317,7 @@ Limits worth knowing:
 | `data/valta.db`, `data/chroma/` | Chat, facts, lessons, and vectors. |
 | `data/library/` | Ingested books and notes. |
 | `data/datasets/`, `data/adapters/`, `data/merged/`, `data/models/` | Training sets, LoRA weights, and GGUF files. |
+| `data/evalplus/` | HumanEval+ and MBPP+ replies and scores. |
 | `data/state.json` | Which personal model is active, and the rollback Modelfile. |
 | `data/interests.txt` | Your research list. |
 | `rules/root.md` | Your private constitution. |
@@ -301,16 +332,19 @@ valta/
 ├── config.toml              hosts, models, limits
 ├── rules/root.example.md    public starter for the constitution
 ├── scripts/start-ollama.ps1 two local Ollama servers
+├── scripts/evalplus_run.py  EvalPlus's checker, run from .venv-eval
 ├── valta/                   the package
 │   ├── ui.py                terminal control center
 │   ├── chat.py              one conversation, several kinds of work
 │   ├── engineer.py          planner, coder, tester, reviewer
+│   ├── repomap.py           the project map the planner and coder see
 │   ├── jobs.py              queue, diffs, pause, stop, approval
 │   ├── memory.py            SQLite
 │   ├── vectors.py           Chroma
-│   ├── research.py          background research
+│   ├── research.py          web research, on request
 │   ├── practice.py          self-set problems, verified by tests
 │   ├── evals.py             the coding eval and the promotion gate
+│   ├── plus_eval.py         HumanEval+ and MBPP+ through EvalPlus
 │   ├── ingest.py            PDF, EPUB, TXT, Markdown
 │   └── train.py             QLoRA and ollama create
 └── tests/
