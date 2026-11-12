@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -121,10 +123,26 @@ class OllamaClient:
             raise OllamaError(f"delete {name} failed ({response.status_code}): {response.text[:400]}")
 
     def create(self, host: str, name: str, modelfile: str) -> None:
+        """Create a model from Modelfile text (FROM and PARAMETER lines).
+
+        Current Ollama no longer takes a raw `modelfile` field. A local GGUF is uploaded as a blob
+        and named under `files`; any other FROM is passed as `from`.
+        """
+        source, parameters = parse_modelfile(modelfile)
+        if not source:
+            raise OllamaError(f"create {name} failed: the Modelfile has no FROM line")
+        body: dict[str, Any] = {"model": name, "stream": True}
+        if parameters:
+            body["parameters"] = parameters
+        path = Path(source)
+        if path.is_file():
+            body["files"] = {path.name: self.push_blob(host, path)}
+        else:
+            body["from"] = source
         with httpx.stream(
             "POST",
             f"{host}/api/create",
-            json={"model": name, "modelfile": modelfile, "stream": True},
+            json=body,
             timeout=None,
         ) as response:
             if response.status_code >= 400:
@@ -138,3 +156,52 @@ class OllamaClient:
                 status = payload.get("status")
                 if status:
                     print(f"  create {name}: {status}", flush=True)
+
+    def push_blob(self, host: str, path: Path) -> str:
+        """Upload a file to the server's blob store, unless it is already there. Returns its digest."""
+        sha = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                sha.update(block)
+        digest = f"sha256:{sha.hexdigest()}"
+        url = f"{host}/api/blobs/{digest}"
+        try:
+            if httpx.head(url, timeout=30).status_code == 200:
+                return digest
+            print(f"  uploading {path.name} to {host}", flush=True)
+            with path.open("rb") as handle:
+                response = httpx.post(url, content=_chunks(handle), timeout=None)
+        except httpx.HTTPError as exc:
+            raise OllamaError(f"Could not upload {path.name} to {host}: {exc}") from exc
+        if response.status_code >= 400:
+            raise OllamaError(f"upload {path.name} failed ({response.status_code}): {response.text[:400]}")
+        return digest
+
+
+def _chunks(handle, size: int = 1 << 20):
+    for block in iter(lambda: handle.read(size), b""):
+        yield block
+
+
+def parse_modelfile(text: str) -> tuple[str, dict[str, Any]]:
+    """The FROM source and PARAMETER values of a simple Modelfile. Numbers become numbers."""
+    source = ""
+    parameters: dict[str, Any] = {}
+    for line in text.splitlines():
+        keyword, _, rest = line.strip().partition(" ")
+        rest = rest.strip()
+        if keyword.upper() == "FROM":
+            source = rest
+        elif keyword.upper() == "PARAMETER":
+            key, _, value = rest.partition(" ")
+            parameters[key] = _number(value.strip())
+    return source, parameters
+
+
+def _number(value: str) -> Any:
+    for cast in (int, float):
+        try:
+            return cast(value)
+        except ValueError:
+            pass
+    return value

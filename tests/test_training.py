@@ -199,3 +199,58 @@ def test_resume_finds_the_newest_merge_and_the_examples_it_trained_on(tmp_path: 
     memory.conn.execute("UPDATE training_examples SET created_at = ? WHERE id = ?", ("2026-11-12T01:00:00+00:00", new))
     memory.conn.commit()
     assert examples_before(memory, "20261112001329") == [old]
+
+
+def test_ollama_create_uploads_a_local_gguf_and_names_it_in_files(tmp_path: Path, monkeypatch):
+    import contextlib
+    import hashlib
+
+    import httpx
+
+    from valta.ollama_client import OllamaClient, parse_modelfile
+
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"weights")
+    digest = "sha256:" + hashlib.sha256(b"weights").hexdigest()
+    assert parse_modelfile(f"FROM {gguf.as_posix()}\nPARAMETER num_ctx 32768\n") == (gguf.as_posix(), {"num_ctx": 32768})
+
+    sent = {}
+
+    class _Head:
+        status_code = 404
+
+    class _Posted:
+        status_code = 201
+        text = ""
+
+    def fake_post(url, content, timeout):
+        sent["blob_url"] = url
+        sent["blob"] = b"".join(content)
+        return _Posted()
+
+    class _Stream:
+        status_code = 200
+
+        def iter_lines(self):
+            return iter(['{"status": "success"}'])
+
+    @contextlib.contextmanager
+    def fake_stream(method, url, json, timeout):
+        sent["create"] = json
+        yield _Stream()
+
+    monkeypatch.setattr(httpx, "head", lambda url, timeout: _Head())
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+    client = OllamaClient(settings=None)
+    client.create("http://h", "valta-candidate", f"FROM {gguf.as_posix()}\nPARAMETER num_ctx 32768\n")
+    assert sent["blob_url"] == f"http://h/api/blobs/{digest}"
+    assert sent["blob"] == b"weights"
+    assert sent["create"] == {
+        "model": "valta-candidate",
+        "stream": True,
+        "parameters": {"num_ctx": 32768},
+        "files": {"model.gguf": digest},
+    }
+    client.create("http://h", "valta", "FROM qwen2.5-coder:3b\n")
+    assert sent["create"]["from"] == "qwen2.5-coder:3b" and "files" not in sent["create"]
