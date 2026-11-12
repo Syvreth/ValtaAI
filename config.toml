@@ -29,6 +29,9 @@ train_max_len = 768
 # from the last save with `valta train --resume`. At about a minute per step on the GTX 1660, 25 loses
 # at most about 25 minutes. 0 turns saving off.
 checkpoint_steps = 25
+# Recompute activations in the backward pass to save GPU memory, at the cost of extra compute.
+# Must stay on for the 3B on the 6 GB GTX 1660: off, the first step crashed the process.
+train_gradient_checkpointing = true
 # How far a new fine-tune may score below the current model on the coding eval and still be promoted (0.1 = 10%).
 # 0 means it must match or beat the current score. With 12 eval tasks, 0.1 lets a model that lost a task through.
 eval_tolerance = 0.0

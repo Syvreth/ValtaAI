@@ -37,6 +37,7 @@ class Settings:
     checkpoint_steps: int = 25
     doc_qa_pairs: int = 20
     train_fp32_embeddings: bool = False
+    train_gradient_checkpointing: bool = True
 
     @property
     def data(self) -> Path:
@@ -135,6 +136,7 @@ def load_settings(root: Path | None = None) -> Settings:
         checkpoint_steps=int(raw.get("checkpoint_steps", 25)),
         doc_qa_pairs=int(raw.get("doc_qa_pairs", 20)),
         train_fp32_embeddings=bool(raw.get("train_fp32_embeddings", False)),
+        train_gradient_checkpointing=bool(raw.get("train_gradient_checkpointing", True)),
     )
     settings.ensure_dirs()
     return settings

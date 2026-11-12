@@ -316,10 +316,11 @@ def run_qlora(
         torch_dtype=compute,
     )
     model.config.use_cache = False
+    checkpointing = settings.train_gradient_checkpointing
     if settings.train_fp32_embeddings:
-        model = prepare_model_for_kbit_training(model)
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=checkpointing)
     else:
-        prepare_lean(model)
+        prepare_lean(model, checkpointing=checkpointing)
     model = get_peft_model(
         model,
         LoraConfig(
@@ -364,8 +365,8 @@ def run_qlora(
         seed=TRAIN_SEED,
         data_seed=TRAIN_SEED,
         report_to="none",
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if checkpointing else None,
         optim="paged_adamw_8bit",
     )
     trainer = Trainer(
@@ -433,7 +434,8 @@ def benchmark_report(durations: list[float], peak_allocated: int, peak_reserved:
         f"Benchmark: {len(durations)} step(s), median {median:.1f} s/step (first step {durations[0]:.1f} s, warm-up).",
         f"Peak GPU memory: {peak_allocated / gib:.2f} GB in use, {peak_reserved / gib:.2f} GB reserved, "
         f"of {total / gib:.2f} GB on the card.",
-        f"Settings: train_max_len={settings.train_max_len}, train_fp32_embeddings={settings.train_fp32_embeddings}.",
+        f"Settings: train_max_len={settings.train_max_len}, train_fp32_embeddings={settings.train_fp32_embeddings}, "
+        f"train_gradient_checkpointing={settings.train_gradient_checkpointing}.",
     ]
     if peak_reserved > total * 0.95:
         lines.append(
@@ -443,7 +445,7 @@ def benchmark_report(durations: list[float], peak_allocated: int, peak_reserved:
     return "\n".join(lines)
 
 
-def prepare_lean(model) -> int:
+def prepare_lean(model, checkpointing: bool = True) -> int:
     """Get a 4-bit model ready for LoRA without peft's blanket fp32 upcast.
 
     peft's prepare_model_for_kbit_training casts every 16-bit weight to fp32, including the frozen
@@ -460,7 +462,8 @@ def prepare_lean(model) -> int:
         if param.ndim == 1 and param.dtype in (torch.float16, torch.bfloat16):
             param.data = param.data.float()
             upcast += param.numel()
-    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    if checkpointing:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.enable_input_require_grads()
     return upcast
 
