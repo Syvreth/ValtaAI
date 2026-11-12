@@ -440,7 +440,10 @@ def practice(
     student = None
     if client.healthy(settings.self_host):
         student = baseline_model(settings)
-        typer.echo(f"Checking each problem against {student} so only what it gets wrong is kept.")
+        if keep_known:
+            typer.echo(f"Every verified problem is kept; each one notes whether {student} already solves it.")
+        else:
+            typer.echo(f"Checking each problem against {student} so only what it gets wrong is kept.")
     else:
         typer.echo("The GTX 1660 server is down, so every verified problem is kept without checking the 3B.")
     session = Practice(settings, memory, client, student_model=student, keep_known=keep_known)
